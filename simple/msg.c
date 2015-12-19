@@ -56,7 +56,6 @@ static int alloc_cm_res(void)
 	struct fi_eq_attr cm_attr = { 0 };
 	int ret;
 
-	cm_attr.wait_obj = FI_WAIT_FD;
 
 	/* Open EQ to receive CM events */
 	ret = fi_eq_open(fab, &cm_attr, &cmeq, NULL);
@@ -439,7 +438,6 @@ int main(int argc, char **argv)
 	hints->ep_attr->type	= FI_EP_MSG;
 	hints->caps		= FI_MSG;
 	hints->mode		= FI_LOCAL_MR;
-	hints->addr_format	= FI_SOCKADDR;
 
 	/* Fabric and connection setup */
 	if (!opts.dst_addr) {

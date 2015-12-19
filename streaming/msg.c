@@ -147,18 +147,18 @@ static int run_test()
 				 recv_xfer(opts.transfer_size);
 		if (ret)
 			return ret;
-
+        /*
 		ret = opts.dst_addr ? recv_xfer(opts.transfer_size) :
 				 send_xfer(opts.transfer_size);
 		if (ret)
-			return ret;
+        return ret;*/
 	}
 	clock_gettime(CLOCK_MONOTONIC, &end);
 
 	if (opts.machr)
-		show_perf_mr(opts.transfer_size, opts.iterations, &start, &end, 2, opts.argc, opts.argv);
+		show_perf_mr(opts.transfer_size, opts.iterations, &start, &end, 1, opts.argc, opts.argv);
 	else
-		show_perf(test_name, opts.transfer_size, opts.iterations, &start, &end, 2);
+		show_perf(test_name, opts.transfer_size, opts.iterations, &start, &end, 1);
 
 	return 0;
 }
@@ -582,7 +582,8 @@ int main(int argc, char **argv)
     hints->domain_attr->threading = FI_THREAD_SAFE;
 	hints->caps = FI_MSG;
 	hints->mode = FI_LOCAL_MR;
-
+    
+    opts.size_option = 1;
 	ret = run();
 
 	fi_freeinfo(hints);

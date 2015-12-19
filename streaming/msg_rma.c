@@ -68,7 +68,7 @@ static int send_xfer(int size)
 {
 	struct fi_cq_data_entry comp;
 	int ret;
-
+    goto post;
 	while (!credits) {
 		ret = fi_cq_read(scq, &comp, 1);
 		if (ret > 0) {
@@ -160,7 +160,7 @@ static int sync_test(void)
 {
 	int ret;
 
-	ret = wait_for_data_completion(scq, max_credits - credits);
+	ret = 0;//wait_for_data_completion(scq, max_credits - credits);
 	if (ret) {
 		return ret;
 	}
@@ -214,9 +214,11 @@ static int run_test(void)
 	ret = sync_test();
 	if (ret)
 		return ret;
-
+    write_data(opts.transfer_size);
+    //wait_for_data_completion(scq, 1);
 	clock_gettime(CLOCK_MONOTONIC, &start);
 	for (i = 0; i < opts.iterations; i++) {
+      if(opts.dst_addr) {
 		switch (op_type) {
 		case FT_RMA_WRITE:
 			ret = write_data(opts.transfer_size);
@@ -231,13 +233,14 @@ static int run_test(void)
 			ret = read_data(opts.transfer_size); 
 			break;
 		}
+		//ret = wait_for_data_completion(scq, 1);
 		if (ret)
 			return ret;
-		ret = wait_for_data_completion(scq, 1);
-		if (ret)
-			return ret;
+      }
 	}
 	clock_gettime(CLOCK_MONOTONIC, &end);
+
+    sync_test();
 
 	if (opts.machr)
 		show_perf_mr(opts.transfer_size, opts.iterations, &start, &end, 
@@ -260,7 +263,6 @@ static int alloc_cm_res(void)
 	int ret;
 
 	memset(&cm_attr, 0, sizeof cm_attr);
-	cm_attr.wait_obj = FI_WAIT_FD;
 	ret = fi_eq_open(fab, &cm_attr, &cmeq, NULL);
 	if (ret)
 		FT_PRINTERR("fi_eq_open", ret);
@@ -294,7 +296,7 @@ static int alloc_ep_res(struct fi_info *fi)
 	memset(&cq_attr, 0, sizeof cq_attr);
 	cq_attr.format = FI_CQ_FORMAT_DATA;
 	cq_attr.wait_obj = FI_WAIT_NONE;
-	cq_attr.size = max_credits << 1;
+	cq_attr.size = opts.iterations;
 	ret = fi_cq_open(dom, &cq_attr, &scq, NULL);
 	if (ret) {
 		FT_PRINTERR("fi_cq_open", ret);
@@ -356,7 +358,7 @@ static int bind_ep_res(void)
 		return ret;
 	}
 
-	ret = fi_ep_bind(ep, &scq->fid, FI_SEND);
+	//ret = fi_ep_bind(ep, &scq->fid, FI_SEND);
 	if (ret) {
 		FT_PRINTERR("fi_ep_bind", ret);
 		return ret;
@@ -647,10 +649,10 @@ static int run(void)
 			goto out;
 	}
 
-	sync_test();
-	wait_for_data_completion(scq, max_credits - credits);
+	//sync_test();
+	//wait_for_data_completion(scq, max_credits - credits);
 	/* Finalize before closing ep */
-	ft_finalize(ep, scq, rcq, FI_ADDR_UNSPEC);
+	//ft_finalize(ep, scq, rcq, FI_ADDR_UNSPEC);
 out:
 	fi_shutdown(ep, 0);
 	free_ep_res();
@@ -699,11 +701,10 @@ int main(int argc, char **argv)
 
 	if (optind < argc)
 		opts.dst_addr = argv[optind];
-
+    opts.size_option = 0;
 	hints->ep_attr->type = FI_EP_MSG;
 	hints->caps = FI_MSG | FI_RMA;
 	hints->mode = FI_LOCAL_MR | FI_RX_CQ_DATA;
-	hints->addr_format = FI_SOCKADDR;
 
 	ret = run();
 

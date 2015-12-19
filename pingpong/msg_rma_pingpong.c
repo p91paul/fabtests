@@ -26,21 +26,25 @@
  * SOFTWARE.
  */
 
+#include <assert.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <getopt.h>
 #include <time.h>
 #include <netdb.h>
-#include <unistd.h>
 
 #include <rdma/fabric.h>
-#include <rdma/fi_errno.h>
 #include <rdma/fi_endpoint.h>
+#include <rdma/fi_rma.h>
 #include <rdma/fi_cm.h>
+#include <rdma/fi_errno.h>
+#include <shared.h>
 
-#include "shared.h"
+#include <fi_ext_dpa.h>
 
+static enum ft_rma_opcodes op_type = FT_RMA_WRITE;
 static struct cs_opts opts;
 static int max_credits = 128;
 static int credits = 128;
@@ -48,6 +52,9 @@ static char test_name[10] = "custom";
 static struct timespec start, end;
 static void *buf;
 static size_t buffer_size;
+struct fi_rma_iov remote;
+static uint64_t cq_data = 1;
+static enum fi_mr_mode mr_mode;
 
 static struct fi_info *hints;
 
@@ -59,13 +66,21 @@ static struct fid_eq *cmeq;
 static struct fid_cq *rcq, *scq;
 static struct fid_mr *mr;
 
-static int send_cq = 1;
+static uint64_t use_scq = 1;
+
+//dpa_local_interrupt_t interrupt;
+//dpa_remote_interrupt_t remoteInterrupt;
+unsigned int interruptNo = 123456;
+unsigned int nodeId;
+//dpa_error_t error;
+int barrier = 1;
+volatile int *written;
 
 static int send_xfer(int size)
 {
-	struct fi_cq_entry comp;
+	struct fi_cq_data_entry comp;
 	int ret;
-    if (!send_cq) goto post;
+    if (!use_scq) goto post;
 	while (!credits) {
 		ret = fi_cq_read(scq, &comp, 1);
 		if (ret > 0) {
@@ -82,7 +97,7 @@ static int send_xfer(int size)
 
 	credits--;
 post:
-	ret = fi_send(ep, buf, (size_t) size, fi_mr_desc(mr), 0, NULL);
+	ret = fi_send(ep, buf, (size_t) size, fi_mr_desc(mr), 0, ep);
 	if (ret)
 		FT_PRINTERR("fi_send", ret);
 
@@ -91,7 +106,7 @@ post:
 
 static int recv_xfer(int size)
 {
-	struct fi_cq_entry comp;
+	struct fi_cq_data_entry comp;
 	int ret;
 
 	do {
@@ -106,7 +121,6 @@ static int recv_xfer(int size)
 		}
 	} while (ret == -FI_EAGAIN);
 
-
 	ret = fi_recv(ep, buf, buffer_size, fi_mr_desc(mr), 0, buf);
 	if (ret)
 		FT_PRINTERR("fi_recv", ret);
@@ -114,16 +128,77 @@ static int recv_xfer(int size)
 	return ret;
 }
 
+static int read_data(size_t size)
+{
+	int ret;
+
+	ret = fi_read(ep, buf, size, fi_mr_desc(mr), 
+		      0, remote.addr, remote.key, ep);
+	if (ret) {
+		FT_PRINTERR("fi_read", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+static int write_data_with_cq_data(size_t size)
+{
+	int ret;
+
+	ret = fi_writedata(ep, buf, size, fi_mr_desc(mr),
+		       cq_data, 0, remote.addr, remote.key, ep);
+	if (ret) {
+		FT_PRINTERR("fi_writedata", ret);
+		return ret;
+	}
+	return 0;
+}
+
+static int write_data(size_t size)
+{
+	int ret;
+
+    const struct iovec iov = {
+      .iov_base = (void*) buf,
+      .iov_len = size
+    };
+    const struct fi_rma_iov rma_iov = {
+      .addr = sizeof(int),
+      .key = remote.key
+    };
+    const struct fi_msg_rma msg = {
+      .msg_iov = &iov,
+      .desc = NULL,
+      .iov_count = 1,
+      .rma_iov = &rma_iov,
+      .rma_iov_count = 1,
+    };
+
+	ret = fi_writemsg(ep, &msg, FI_MORE);    
+	if (ret) {
+		FT_PRINTERR("fi_write", ret);
+		return ret;
+	}
+
+	ret = fi_write(ep, &barrier, sizeof(int), NULL, 0, 0, remote.key, NULL);
+	if (ret) {
+		FT_PRINTERR("fi_write", ret);
+		return ret;
+	}
+	return 0;
+}
+
 static int sync_test(void)
 {
 	int ret;
-    if (send_cq) {
-      ret = wait_for_completion(scq, max_credits - credits);
+    if (use_scq){
+      ret = wait_for_data_completion(scq, max_credits - credits);
       if (ret) {
-        return ret;
+		return ret;
       }
-      credits = max_credits;
     }
+	credits = max_credits;
 
 	ret = opts.dst_addr ? send_xfer(16) : recv_xfer(16);
 	if (ret) {
@@ -133,32 +208,100 @@ static int sync_test(void)
 	return opts.dst_addr ? recv_xfer(16) : send_xfer(16);
 }
 
-static int run_test()
+static int wait_remote_writedata_completion(void)
+{
+	struct fi_cq_data_entry comp;
+	int ret;
+
+	do {
+		ret = fi_cq_read(rcq, &comp, 1);
+		if (ret < 0 && ret != -FI_EAGAIN) {
+			if (ret == -FI_EAVAIL) {
+				cq_readerr(rcq, "rcq");
+			} else {
+				FT_PRINTERR("fi_cq_read", ret);
+			}
+			return ret;
+		}
+	} while (ret == -FI_EAGAIN);
+
+	ret = 0;
+	if (comp.data != cq_data) {
+		fprintf(stderr, "Got unexpected completion data %" PRIu64 "\n",
+			comp.data);
+	}
+	assert(comp.op_context == buf || comp.op_context == NULL);
+	if (comp.op_context == buf) {
+		/* We need to repost the receive */
+		ret = fi_recv(ep, buf, buffer_size, fi_mr_desc(mr), 0, buf);
+		if (ret)
+			FT_PRINTERR("fi_recv", ret);
+	}
+
+	return ret;
+}
+
+static int write(void) {
+  int ret=0;
+  switch (op_type) {
+  case FT_RMA_WRITE:
+    ret = write_data(opts.transfer_size);
+    break;
+  case FT_RMA_WRITEDATA:
+    ret = write_data_with_cq_data(opts.transfer_size);
+    if (ret)
+      return ret;
+    ret = wait_remote_writedata_completion();
+    break;
+  case FT_RMA_READ:
+    ret = read_data(opts.transfer_size); 
+    break;
+  }
+  if (ret)
+    return ret;
+  if (use_scq) {
+    ret = wait_for_data_completion(scq, 1);
+    if (ret)
+      return ret;
+  }
+  //DPATriggerInterrupt(remoteInterrupt, 0, &error);
+  return ret;
+}
+
+static void wait() {
+  while (*written != barrier);
+}
+  
+static int run_test(void)
 {
 	int ret, i;
-
+    
 	ret = sync_test();
-	if (ret)
-		return ret;
-
+    write_data(opts.transfer_size);
+    *written = 0;
+    if (use_scq)
+      wait_for_data_completion(scq, 1);
 	clock_gettime(CLOCK_MONOTONIC, &start);
 	for (i = 0; i < opts.iterations; i++) {
-		ret = opts.dst_addr ? send_xfer(opts.transfer_size) :
-				 recv_xfer(opts.transfer_size);
-		if (ret)
-			return ret;
-
-		ret = opts.dst_addr ? recv_xfer(opts.transfer_size) :
-				 send_xfer(opts.transfer_size);
-		if (ret)
-			return ret;
+      if (opts.dst_addr) {
+        ret = write();
+        if (ret) return ret;
+        wait();
+      } else {
+        wait();
+        ret = write();
+        if (ret) return ret;
+      }
+      barrier++;
 	}
 	clock_gettime(CLOCK_MONOTONIC, &end);
 
 	if (opts.machr)
-		show_perf_mr(opts.transfer_size, opts.iterations, &start, &end, 2, opts.argc, opts.argv);
+		show_perf_mr(opts.transfer_size, opts.iterations, &start, &end, 
+				2, opts.argc, opts.argv);
 	else
-		show_perf(test_name, opts.transfer_size, opts.iterations, &start, &end, 2);
+		show_perf(test_name, opts.transfer_size, opts.iterations, 
+				&start, &end, 2);
 
 	return 0;
 }
@@ -174,7 +317,6 @@ static int alloc_cm_res(void)
 	int ret;
 
 	memset(&cm_attr, 0, sizeof cm_attr);
-	//cm_attr.wait_obj = FI_WAIT_FD;
 	ret = fi_eq_open(fab, &cm_attr, &cmeq, NULL);
 	if (ret)
 		FT_PRINTERR("fi_eq_open", ret);
@@ -187,57 +329,65 @@ static void free_ep_res(void)
 	fi_close(&ep->fid);
 	fi_close(&mr->fid);
 	fi_close(&rcq->fid);
-    fi_close(&scq->fid);
+	fi_close(&scq->fid);
 	free(buf);
 }
 
 static int alloc_ep_res(struct fi_info *fi)
 {
 	struct fi_cq_attr cq_attr;
+	uint64_t access_mode;
 	int ret;
 
 	buffer_size = opts.user_options & FT_OPT_SIZE ?
 			opts.transfer_size : test_size[TEST_CNT - 1].size;
-	buf = malloc(buffer_size);
+	buf = malloc(MAX(buffer_size, sizeof(uint64_t)));
 	if (!buf) {
 		perror("malloc");
 		return -1;
 	}
 
 	memset(&cq_attr, 0, sizeof cq_attr);
-	cq_attr.format = FI_CQ_FORMAT_CONTEXT;
+	cq_attr.format = FI_CQ_FORMAT_DATA;
 	cq_attr.wait_obj = FI_WAIT_NONE;
-	cq_attr.size = max_credits << 1;
-    if(send_cq) {
-      ret = fi_cq_open(dom, &cq_attr, &scq, NULL);
-      if (ret) {
+	cq_attr.size = opts.iterations;
+	ret = fi_cq_open(dom, &cq_attr, &scq, NULL);
+	if (ret) {
 		FT_PRINTERR("fi_cq_open", ret);
 		goto err1;
-      }
-    }
+	}
 
 	ret = fi_cq_open(dom, &cq_attr, &rcq, NULL);
 	if (ret) {
 		FT_PRINTERR("fi_cq_open", ret);
 		goto err2;
 	}
-
-	ret = fi_mr_reg(dom, buf, buffer_size, 0, 0, 0, 0, &mr, NULL);
+	
+	switch (op_type) {
+	case FT_RMA_READ:
+		access_mode = FI_REMOTE_READ;
+		break;
+	case FT_RMA_WRITE:
+	case FT_RMA_WRITEDATA:
+		access_mode = FI_REMOTE_WRITE;
+		break;
+	default:
+		assert(0);
+		ret = -FI_EINVAL;
+		goto err3;
+	}
+	ret = fi_mr_reg(dom, buf, MAX(buffer_size, sizeof(uint64_t)), 
+			access_mode, 0, 0, 0, &mr, NULL);
 	if (ret) {
 		FT_PRINTERR("fi_mr_reg", ret);
 		goto err3;
 	}
+    written = (volatile int*)fi_mr_desc(mr);
 
 	if (!cmeq) {
 		ret = alloc_cm_res();
 		if (ret)
 			goto err4;
-	}
-
-	ret = fi_endpoint(dom, fi, &ep, NULL);
-	if (ret) {
-		FT_PRINTERR("fi_endpoint", ret);
-		goto err4;
 	}
 
 	return 0;
@@ -262,7 +412,7 @@ static int bind_ep_res(void)
 		FT_PRINTERR("fi_ep_bind", ret);
 		return ret;
 	}
-    if (send_cq) {
+    if (use_scq) {
       ret = fi_ep_bind(ep, &scq->fid, FI_SEND);
       if (ret) {
 		FT_PRINTERR("fi_ep_bind", ret);
@@ -281,7 +431,7 @@ static int bind_ep_res(void)
 		FT_PRINTERR("fi_enable", ret);
 		return ret;
 	}
-
+	
 	/* Post the first recv buffer */
 	ret = fi_recv(ep, buf, buffer_size, fi_mr_desc(mr), 0, buf);
 	if (ret)
@@ -364,9 +514,19 @@ static int server_connect(void)
 		goto err1;
 	}
 
+    nodeId = ((struct dpa_addr_t*)info->dest_addr)->nodeId;
+
+	mr_mode = info->domain_attr->mr_mode;
 	ret = fi_domain(fab, info, &dom, NULL);
 	if (ret) {
 		FT_PRINTERR("fi_domain", ret);
+		goto err1;
+	}
+
+
+	ret = fi_endpoint(dom, info, &ep, NULL);
+	if (ret) {
+		FT_PRINTERR("fi_endpoint", -ret);
 		goto err1;
 	}
 
@@ -385,35 +545,32 @@ static int server_connect(void)
 	}
 
 	rd = fi_eq_sread(cmeq, &event, &entry, sizeof entry, -1, 0);
-	if (rd != sizeof entry) {
+ 	if (rd != sizeof entry) {
 		FT_PRINTERR("fi_eq_sread", rd);
 		goto err3;
-	}
+ 	}
 
 	if (event != FI_CONNECTED || entry.fid != &ep->fid) {
 		fprintf(stderr, "Unexpected CM event %d fid %p (ep %p)\n",
 			event, entry.fid, ep);
-		ret = -FI_EOTHER;
-		goto err3;
-	}
-
-	fi_close(&pep->fid);
-
-	fi_freeinfo(info);
-	return 0;
+ 		ret = -FI_EOTHER;
+ 		goto err3;
+ 	}
+ 
+ 	fi_freeinfo(info);
+ 	return 0;
 
 err3:
 	free_ep_res();
 err1:
-	fi_reject(pep, info->handle, NULL, 0);
-	fi_freeinfo(info);
-	return ret;
+ 	fi_reject(pep, info->handle, NULL, 0);
+ 	fi_freeinfo(info);
+ 	return ret;
 }
 
 static int client_connect(void)
 {
 	struct fi_eq_cm_entry entry;
-	struct fi_eq_err_entry err;
 	uint32_t event;
 	struct fi_info *fi;
 	ssize_t rd;
@@ -428,6 +585,7 @@ static int client_connect(void)
 		FT_PRINTERR("fi_getinfo", ret);
 		goto err0;
 	}
+    nodeId = ((struct dpa_addr_t*)fi->dest_addr)->nodeId;
 
 	ret = fi_fabric(fi->fabric_attr, &fab, NULL);
 	if (ret) {
@@ -435,7 +593,8 @@ static int client_connect(void)
 		goto err1;
 	}
 
-	ret = fi_domain(fab, fi, &dom, NULL);
+	mr_mode = fi->domain_attr->mr_mode;
+ 	ret = fi_domain(fab, fi, &dom, NULL);
 	if (ret) {
 		FT_PRINTERR("fi_domain", ret);
 		goto err2;
@@ -461,28 +620,18 @@ static int client_connect(void)
 		goto err5;
 	}
 
-	rd = fi_eq_sread(cmeq, &event, &entry, sizeof entry, -1, 0);
+ 	rd = fi_eq_sread(cmeq, &event, &entry, sizeof entry, -1, 0);
 	if (rd != sizeof entry) {
-		if (rd == -FI_EAVAIL) {
-			rd = fi_eq_readerr(cmeq, &err, 0);
-			if (rd != sizeof(err)) {
-				FT_PRINTERR("fi_eq_sread", rd);
-			} else {
-				fprintf(stderr, "EQ report error %d %s\n", err.err,
-						fi_strerror(err.err));
-			}
-		} else {
-			FT_PRINTERR("fi_eq_sread", rd);
-		}
+		FT_PRINTERR("fi_eq_sread", rd);
 		return (int) rd;
 	}
 
-	if (event != FI_CONNECTED || entry.fid != &ep->fid) {
-		fprintf(stderr, "Unexpected CM event %d fid %p (ep %p)\n",
-			event, entry.fid, ep);
-		ret = -FI_EOTHER;
-		goto err5;
-	}
+ 	if (event != FI_CONNECTED || entry.fid != &ep->fid) {
+ 		fprintf(stderr, "Unexpected CM event %d fid %p (ep %p)\n",
+ 			event, entry.fid, ep);
+ 		ret = -FI_EOTHER;
+ 		goto err1;
+ 	}
 
 	fi_freeinfo(fi);
 	return 0;
@@ -499,6 +648,31 @@ err0:
 	return ret;
 }
 
+static int exchange_addr_key(void)
+{
+	struct fi_rma_iov *rma_iov;
+
+	rma_iov = buf;
+	if (opts.dst_addr) {
+		rma_iov->addr = mr_mode == FI_MR_SCALABLE ?
+				0 : (uintptr_t) buf;
+		rma_iov->key = fi_mr_key(mr);
+		send_xfer(sizeof *rma_iov);
+		recv_xfer(sizeof *rma_iov);
+		remote = *rma_iov;
+	} else {
+		recv_xfer(sizeof *rma_iov);
+		remote = *rma_iov;
+
+		rma_iov->addr = mr_mode == FI_MR_SCALABLE ?
+				0 : (uintptr_t) buf;
+		rma_iov->key = fi_mr_key(mr);
+		send_xfer(sizeof *rma_iov);
+	}
+
+	return 0;
+}
+
 static int run(void)
 {
 	int i, ret = 0;
@@ -510,10 +684,21 @@ static int run(void)
 	}
 
 	ret = opts.dst_addr ? client_connect() : server_connect();
-	if (ret) {
+	if (ret)
 		return ret;
-	}
 
+	ret = exchange_addr_key();
+	if (ret)
+		return ret;
+
+    /*dpa_error_t error;
+    dpa_desc_t sd;
+    DPAOpen(&sd, 0, &error);
+    DPACreateInterrupt(sd, &interrupt, 0, &interruptNo, NULL, NULL, DPA_FLAG_FIXED_INTNO, &error);
+    do {
+      DPAConnectInterrupt(sd, &remoteInterrupt, nodeId, 0, interruptNo, DPA_INFINITE_TIMEOUT, 0, &error);
+    } while(error != DPA_ERR_OK);
+    */
 	if (!(opts.user_options & FT_OPT_SIZE)) {
 		for (i = 0; i < TEST_CNT; i++) {
 			if (test_size[i].option > opts.size_option)
@@ -530,20 +715,17 @@ static int run(void)
 		if (ret)
 			goto out;
 	}
-    if (send_cq)
-      ret = wait_for_completion(scq, max_credits - credits);
-    if (!send_cq) {
-      struct fi_cq_attr cq_attr;
-      memset(&cq_attr, 0, sizeof cq_attr);
-      cq_attr.format = FI_CQ_FORMAT_CONTEXT;
-      cq_attr.wait_obj = FI_WAIT_NONE;
-      cq_attr.size = 1;
-      fi_cq_open(dom, &cq_attr, &scq, NULL);
-      fi_ep_bind(ep, &scq->fid, FI_SEND);      
+
+	sync_test();
+    if (use_scq) {
+      wait_for_data_completion(scq, max_credits - credits);
+      /* Finalize before closing ep */
+      ft_finalize(ep, scq, rcq, FI_ADDR_UNSPEC);
     }
-    /* Finalize before closing ep */
-    ft_finalize(ep, scq, rcq, FI_ADDR_UNSPEC);
 out:
+    /*DPADisconnectInterrupt(remoteInterrupt, 0, &error);
+    DPARemoveInterrupt(interrupt, 0, &error);
+    DPAClose(sd, 0, &error);*/
 	fi_shutdown(ep, 0);
 	free_ep_res();
 	if (!opts.dst_addr)
@@ -562,26 +744,39 @@ int main(int argc, char **argv)
 	if (!hints)
 		return EXIT_FAILURE;
 
-	while ((op = getopt(argc, argv, "h" CS_OPTS INFO_OPTS)) != -1) {
+	while ((op = getopt(argc, argv, "ho:" CS_OPTS INFO_OPTS)) != -1) {
 		switch (op) {
+		case 'o':
+			if (!strcmp(optarg, "read")) {
+				op_type = FT_RMA_READ;
+			} else if (!strcmp(optarg, "writedata")) {
+				op_type = FT_RMA_WRITEDATA;
+			} else if (!strcmp(optarg, "write")) {
+				op_type = FT_RMA_WRITE;
+			} else {
+				ft_csusage(argv[0], NULL);
+				fprintf(stderr, "  -o <op>\tselect operation type (read or write)\n");
+				return EXIT_FAILURE;
+			}
+			break;
 		default:
 			ft_parseinfo(op, optarg, hints);
 			ft_parsecsopts(op, optarg, &opts);
 			break;
 		case '?':
 		case 'h':
-			ft_csusage(argv[0], "Ping pong client and server using message endpoints.");
+			ft_csusage(argv[0], "Ping pong client and server using message RMA.");
+			fprintf(stderr, "  -o <op>\trma op type: read|write|writedata (default: write)]\n");
 			return EXIT_FAILURE;
 		}
 	}
 
 	if (optind < argc)
 		opts.dst_addr = argv[optind];
-
+    opts.size_option = 0;
 	hints->ep_attr->type = FI_EP_MSG;
-    hints->domain_attr->threading = FI_THREAD_SAFE;
-	hints->caps = FI_MSG;
-	hints->mode = FI_LOCAL_MR;
+	hints->caps = FI_MSG | FI_RMA;
+	hints->mode = FI_LOCAL_MR | FI_RX_CQ_DATA;
 
 	ret = run();
 

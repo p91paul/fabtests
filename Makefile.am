@@ -17,7 +17,9 @@ bin_PROGRAMS = \
 	streaming/fi_rdm_atomic \
 	streaming/fi_rdm_multi_recv \
 	streaming/fi_rdm_rma \
+	streaming/fi_msg_streaming \
 	pingpong/fi_msg_pingpong \
+	pingpong/fi_msg_rma_pingpong \
 	pingpong/fi_rdm_inject_pingpong \
 	pingpong/fi_rdm_cntr_pingpong \
 	pingpong/fi_ud_pingpong \
@@ -97,6 +99,10 @@ streaming_fi_msg_rma_SOURCES = \
 	streaming/msg_rma.c
 streaming_fi_msg_rma_LDADD = libfabtests.la
 
+streaming_fi_msg_streaming_SOURCES = \
+	streaming/msg.c
+streaming_fi_msg_streaming_LDADD = libfabtests.la
+
 streaming_fi_rdm_atomic_SOURCES = \
 	streaming/rdm_atomic.c
 streaming_fi_rdm_atomic_LDADD = libfabtests.la
@@ -112,6 +118,10 @@ streaming_fi_rdm_rma_LDADD = libfabtests.la
 pingpong_fi_msg_pingpong_SOURCES = \
 	pingpong/msg_pingpong.c
 pingpong_fi_msg_pingpong_LDADD = libfabtests.la
+
+pingpong_fi_msg_rma_pingpong_SOURCES = \
+	pingpong/msg_rma_pingpong.c
+pingpong_fi_msg_rma_pingpong_LDADD = libfabtests.la
 
 pingpong_fi_ud_pingpong_SOURCES = \
 	pingpong/ud_pingpong.c
