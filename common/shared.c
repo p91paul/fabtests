@@ -1281,10 +1281,22 @@ int ft_check_buf(void *buf, int size)
 		if (c != recv_data[i])
 			break;
 	}
-	if (i != size) {
-		printf("Error at iteration=%d size=%d byte=%d\n",
-			iter, size, i);
-		return 1;
+	if (i != size) {	  
+	  printf("Error at iteration=%d size=%d byte=%d\n",
+			 iter, size, i);
+	  printf("Expected: ");
+	  msg_index = ((iter-1)*INTEG_SEED) % integ_alphabet_length;
+	  for (i = 0; i < size; i++, msg_index=(msg_index + 1)%integ_alphabet_length) {
+		c = integ_alphabet[msg_index];
+		printf("%02x ", c);
+	  }
+	  printf("\nReceived: ");
+	  for (i = 0; i < size; i++) {
+		c = integ_alphabet[msg_index];
+		printf("%02x ", c);
+	  }
+	  printf("\n");
+	  return 1;
 	}
 
 	return 0;
