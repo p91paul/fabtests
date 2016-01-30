@@ -303,6 +303,14 @@ int ft_alloc_active_res(struct fi_info *fi)
 			FT_PRINTERR("fi_cntr_open", ret);
 			return ret;
 		}
+
+		if (opts.comp_method == FT_COMP_WAIT_FD) {
+			ret = fi_control(&txcntr->fid, FI_GETWAIT, (void *) &tx_fd);
+			if (ret) {
+				FT_PRINTERR("fi_control(FI_GETWAIT)", ret);
+				return ret;
+			}
+		}
 	}
 
 	if (opts.options & FT_OPT_RX_CQ) {
@@ -329,6 +337,14 @@ int ft_alloc_active_res(struct fi_info *fi)
 		if (ret) {
 			FT_PRINTERR("fi_cntr_open", ret);
 			return ret;
+		}
+
+		if (opts.comp_method == FT_COMP_WAIT_FD) {
+			ret = fi_control(&rxcntr->fid, FI_GETWAIT, (void *) &rx_fd);
+			if (ret) {
+				FT_PRINTERR("fi_control(FI_GETWAIT)", ret);
+				return ret;
+			}
 		}
 	}
 
@@ -808,8 +824,8 @@ ssize_t ft_rx(size_t size)
 /*
  * fi_cq_err_entry can be cast to any CQ entry format.
  */
-static int ft_spin_for_comp(struct fid_cq *cq, uint64_t *cur,
-			    uint64_t total, int timeout)
+static int ft_spin_for_comp(struct fid_cq *cq, struct fid_cntr* cntr,
+                            uint64_t *cur, uint64_t total, int timeout)
 {
 	struct fi_cq_err_entry comp;
 	struct timespec a, b;
@@ -819,13 +835,20 @@ static int ft_spin_for_comp(struct fid_cq *cq, uint64_t *cur,
 		clock_gettime(CLOCK_MONOTONIC, &a);
 
 	while (total - *cur > 0) {
-		ret = fi_cq_read(cq, &comp, 1);
-		if (ret > 0) {
-			if (timeout >= 0)
-				clock_gettime(CLOCK_MONOTONIC, &a);
+		if (cq) {
+			ret = fi_cq_read(cq, &comp, 1);
+			if (ret > 0) {
+				if (timeout >= 0)
+					clock_gettime(CLOCK_MONOTONIC, &a);
 
-			(*cur)++;
-		} else if (ret < 0 && ret != -FI_EAGAIN) {
+				(*cur)++;
+			}
+		} else {
+			*cur = fi_cntr_read(cntr);
+			ret = FI_SUCCESS;
+		}
+		
+		if (ret < 0 && ret != -FI_EAGAIN) {
 			return ret;
 		} else if (timeout >= 0) {
 			clock_gettime(CLOCK_MONOTONIC, &b);
@@ -842,17 +865,23 @@ static int ft_spin_for_comp(struct fid_cq *cq, uint64_t *cur,
 /*
  * fi_cq_err_entry can be cast to any CQ entry format.
  */
-static int ft_wait_for_comp(struct fid_cq *cq, uint64_t *cur,
-			    uint64_t total, int timeout)
+static int ft_wait_for_comp(struct fid_cq *cq, struct fid_cntr* cntr,
+                            uint64_t *cur, uint64_t total, int timeout)
 {
 	struct fi_cq_err_entry comp;
 	int ret;
 
 	while (total - *cur > 0) {
-		ret = fi_cq_sread(cq, &comp, 1, NULL, timeout);
-		if (ret > 0)
-			(*cur)++;
-		else if (ret < 0 && ret != -FI_EAGAIN)
+		if (cq) {
+			ret = fi_cq_sread(cq, &comp, 1, NULL, timeout);
+			if (ret > 0) {
+				(*cur)++;
+			}
+		} else {
+			ret = fi_cntr_wait(cntr, total, timeout);
+			*cur = fi_cntr_read(cntr);
+		}
+		if (ret < 0 && ret != -FI_EAGAIN)
 			return ret;
 	}
 
@@ -862,19 +891,25 @@ static int ft_wait_for_comp(struct fid_cq *cq, uint64_t *cur,
 /*
  * fi_cq_err_entry can be cast to any CQ entry format.
  */
-static int ft_fdwait_for_comp(struct fid_cq *cq, uint64_t *cur,
-			    uint64_t total, int timeout)
+static int ft_fdwait_for_comp(struct fid_cq *cq, struct fid_cntr* cntr,
+                              uint64_t *cur, uint64_t total, int timeout)
 {
 	struct fi_cq_err_entry comp;
 	int fd, ret;
 
-	fd = cq == txcq ? tx_fd : rx_fd;
+	fd = (cq && cq == txcq) || (cntr && cntr == txcntr) ? tx_fd : rx_fd;
 
 	while (total - *cur > 0) {
-		ret = fi_cq_sread(cq, &comp, 1, NULL, 0);
-		if (ret > 0) {
-			(*cur)++;
-		} else if (ret < 0 && ret != -FI_EAGAIN) {
+		if (cq) {
+			ret = fi_cq_read(cq, &comp, 1);
+			if (ret > 0) {
+				(*cur)++;
+			}
+		} else {
+			*cur = fi_cntr_read(cntr);
+			ret = FI_SUCCESS;
+		}
+		if (ret < 0 && ret != -FI_EAGAIN) {
 			return ret;
 		} else {
 			ret = ft_poll_fd(fd, timeout);
@@ -886,29 +921,30 @@ static int ft_fdwait_for_comp(struct fid_cq *cq, uint64_t *cur,
 	return 0;
 }
 
-static int ft_get_cq_comp(struct fid_cq *cq, uint64_t *cur,
-			  uint64_t total, int timeout)
+static int ft_get_comp(struct fid_cq *cq, struct fid_cntr* cntr,
+                       uint64_t *cur, uint64_t total, int timeout)
 {
 	int ret;
+	if (!cq && !cntr) return -FI_EINVAL;
 
 	switch (opts.comp_method) {
 	case FT_COMP_SREAD:
-		ret = ft_wait_for_comp(cq, cur, total, timeout);
+		ret = ft_wait_for_comp(cq, cntr, cur, total, timeout);
 		break;
 	case FT_COMP_WAIT_FD:
-		ret = ft_fdwait_for_comp(cq, cur, total, timeout);
+		ret = ft_fdwait_for_comp(cq, cntr, cur, total, timeout);
 		break;
 	default:
-		ret = ft_spin_for_comp(cq, cur, total, timeout);
+		ret = ft_spin_for_comp(cq, cntr, cur, total, timeout);
 		break;
 	}
 
 	if (ret) {
-		if (ret == -FI_EAVAIL) {
+		if (ret == -FI_EAVAIL && cq) {
 			ret = ft_cq_readerr(cq);
 			(*cur)++;
 		} else {
-			FT_PRINTERR("ft_get_cq_comp", ret);
+			FT_PRINTERR("ft_get_comp", ret);
 		}
 	}
 	return ret;
@@ -916,34 +952,12 @@ static int ft_get_cq_comp(struct fid_cq *cq, uint64_t *cur,
 
 int ft_get_rx_comp(uint64_t total)
 {
-	int ret = FI_SUCCESS;
-
-	if (rxcq) {
-		ret = ft_get_cq_comp(rxcq, &rx_cq_cntr, total, timeout);
-	} else {
-		while (fi_cntr_read(rxcntr) < total) {
-			ret = fi_cntr_wait(rxcntr, total, timeout);
-			if (ret)
-				FT_PRINTERR("fi_cntr_wait", ret);
-			else
-				break;
-		}
-	}
-	return ret;
+	return ft_get_comp(rxcq, rxcntr, &rx_cq_cntr, total, timeout);
 }
 
 int ft_get_tx_comp(uint64_t total)
 {
-	int ret;
-
-	if (txcq) {
-		ret = ft_get_cq_comp(txcq, &tx_cq_cntr, total, -1);
-	} else {
-		ret = fi_cntr_wait(txcntr, total, -1);
-		if (ret)
-			FT_PRINTERR("fi_cntr_wait", ret);
-	}
-	return ret;
+	return ft_get_comp(txcq, txcntr, &tx_cq_cntr, total, -1);
 }
 
 int ft_cq_readerr(struct fid_cq *cq)
