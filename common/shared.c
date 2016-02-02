@@ -49,8 +49,8 @@ struct fid_domain *domain;
 struct fid_poll *pollset;
 struct fid_pep *pep;
 struct fid_ep *ep;
-struct fid_cq *txcq, *rxcq;
-struct fid_cntr *txcntr, *rxcntr;
+struct fid_cq *txcq = NULL, *rxcq = NULL;
+struct fid_cntr *txcntr = NULL, *rxcntr = NULL;
 struct fid_mr *mr;
 struct fid_av *av;
 struct fid_eq *eq;
@@ -895,7 +895,7 @@ static int ft_fdwait_for_comp(struct fid_cq *cq, struct fid_cntr* cntr,
                               uint64_t *cur, uint64_t total, int timeout)
 {
 	struct fi_cq_err_entry comp;
-	int fd, ret;
+	int fd, ret, prev;
 
 	fd = (cq && cq == txcq) || (cntr && cntr == txcntr) ? tx_fd : rx_fd;
 
@@ -904,14 +904,15 @@ static int ft_fdwait_for_comp(struct fid_cq *cq, struct fid_cntr* cntr,
 			ret = fi_cq_read(cq, &comp, 1);
 			if (ret > 0) {
 				(*cur)++;
+			} else if (ret < 0 && ret != -FI_EAGAIN) {
+			  return ret;
 			}
-		} else {
-			*cur = fi_cntr_read(cntr);
-			ret = FI_SUCCESS;
+		} else {  
+		  prev = *cur;
+		  *cur = fi_cntr_read(cntr);
+		  ret = *cur - prev;
 		}
-		if (ret < 0 && ret != -FI_EAGAIN) {
-			return ret;
-		} else {
+		if (ret <= 0) {
 			ret = ft_poll_fd(fd, timeout);
 			if (ret)
 				return ret;
