@@ -49,7 +49,7 @@ int barrier = 1;
 volatile int* written;
 
 static int write(void) {
-  int ret = 0`;
+  int ret = 0;
   switch (op_type) {
   case FT_RMA_WRITE:;
 	const struct iovec iov = {
