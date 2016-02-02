@@ -53,8 +53,8 @@ static struct ft_series *series;
 static int test_start_index, test_end_index = INT_MAX;
 struct ft_info test_info;
 struct fi_info *fabric_info;
-struct ft_xcontrol ft_rx, ft_tx;
-struct ft_control ft;
+struct ft_xcontrol ft_rx_ctrl, ft_tx_ctrl;
+struct ft_control ft_ctrl;
 
 size_t recv_size, send_size;
 
@@ -107,6 +107,16 @@ static void ft_show_test_info(void)
 	case FT_FUNC_SENDMSG:
 		printf(" sendmsg");
 		break;
+	case FT_FUNC_INJECT:
+		printf(" inject");
+		if (fabric_info && fabric_info->tx_attr)
+			printf(" [inject_size: %zd]", fabric_info->tx_attr->inject_size);
+		break;
+	case FT_FUNC_INJECTDATA:
+		printf(" injectdata");
+		if (fabric_info && fabric_info->tx_attr)
+			printf(" [inject_size: %zd]", fabric_info->tx_attr->inject_size);
+		break;
 	default:
 		break;
 	}
@@ -145,31 +155,29 @@ static int ft_fw_listen(char *service)
 	if (listen_sock < 0) {
 		perror("socket");
 		ret = listen_sock;
-		goto free;
+		goto out;
 	}
 
 	val = 1;
 	ret = setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &val, sizeof val);
 	if (ret) {
 		perror("setsockopt SO_REUSEADDR");
-		goto close;
+		goto out;
 	}
 
 	ret = bind(listen_sock, ai->ai_addr, ai->ai_addrlen);
 	if (ret) {
 		perror("bind");
-		goto close;
+		goto out;
 	}
 
 	ret = listen(listen_sock, 0);
 	if (ret)
 		perror("listen");
 
-	return 0;
-
-close:
-	close(listen_sock);
-free:
+out:
+	if (ret && listen_sock >= 0)
+		close(listen_sock);
 	freeaddrinfo(ai);
 	return ret;
 }
@@ -193,7 +201,9 @@ static int ft_fw_connect(char *node, char *service)
 	}
 
 	ret = 1;
-	setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (void *) &ret, sizeof(ret));
+	ret = setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (void *) &ret, sizeof(ret));
+	if (ret)
+		perror("setsockopt");
 
 	ret = connect(sock, ai->ai_addr, ai->ai_addrlen);
 	if (ret) {
@@ -278,11 +288,11 @@ ft_fw_update_info(struct ft_info *test_info, struct fi_info *info, int subindex)
 	if (info->fabric_attr) {
 		if (info->fabric_attr->prov_name) {
 			strncpy(test_info->prov_name, info->fabric_attr->prov_name,
-				sizeof test_info->prov_name);
+				sizeof test_info->prov_name - 1);
 		}
 		if (info->fabric_attr->name) {
 			strncpy(test_info->fabric_name, info->fabric_attr->name,
-				sizeof test_info->fabric_name);
+				sizeof test_info->fabric_name - 1);
 		}
 	}
 }
@@ -318,11 +328,16 @@ static int ft_fw_server(void)
 			break;
 		}
 
+		test_info.node[sizeof(test_info.node) - 1] = '\0';
+		test_info.service[sizeof(test_info.service) - 1] = '\0';
+		test_info.prov_name[sizeof(test_info.prov_name) - 1] = '\0';
+		test_info.fabric_name[sizeof(test_info.fabric_name) - 1] = '\0';
+
 		ft_fw_convert_info(hints, &test_info);
 		printf("Starting test %d-%d: ", test_info.test_index,
 			test_info.test_subindex);
 		ft_show_test_info();
-		ret = fi_getinfo(FT_VERSION, ft_strptr(test_info.node),
+		ret = fi_getinfo(FT_FIVERSION, ft_strptr(test_info.node),
 				 ft_strptr(test_info.service), FI_SOURCE,
 				 hints, &info);
 		if (ret) {
@@ -408,7 +423,7 @@ static int ft_fw_client(void)
 		ft_fw_convert_info(hints, &test_info);
 
 		printf("Starting test %d / %d\n", test_info.test_index, series->test_count);
-		ret = fi_getinfo(FT_VERSION, ft_strptr(test_info.node),
+		ret = fi_getinfo(FT_FIVERSION, ft_strptr(test_info.node),
 				 ft_strptr(test_info.service), 0, hints, &info);
 		if (ret) {
 			FT_PRINTERR("fi_getinfo", ret);
@@ -442,27 +457,30 @@ static void ft_fw_show_results(void)
 
 static void ft_fw_usage(char *program)
 {
-	printf("usage: %s [server_node]\n", program);
-	printf("\t[-f test_config_file]\n");
-	printf("\t[-p service_port]\n");
-	printf("\t[-x]   exit after test run\n");
-	printf("\t[-y start_test_index]\n");
-	printf("\t[-z end_test_index]\n");
+	fprintf(stderr, "usage: %s [server_node]\n", program);
+	fprintf(stderr, "\nOptions:\n");
+	FT_PRINT_OPTS_USAGE("-f <test_config_file>", "");
+	FT_PRINT_OPTS_USAGE("-q <service_port>", "Management port for test");
+	FT_PRINT_OPTS_USAGE("-p <dst_port>", "destination port number");
+	FT_PRINT_OPTS_USAGE("-x", "exit after test run");
+	FT_PRINT_OPTS_USAGE("-y <start_test_index>", "");
+	FT_PRINT_OPTS_USAGE("-z <end_test_index>", "");
+	FT_PRINT_OPTS_USAGE("-h", "display this help output");
 }
 
 int main(int argc, char **argv)
 {
-	char *node;
 	char *service = "2710";
 	char *filename = NULL;
+	opts = INIT_OPTS;
 	int ret, op;
 
-	while ((op = getopt(argc, argv, "f:p:xy:z:")) != -1) {
+	while ((op = getopt(argc, argv, "f:q:p:xy:z:h")) != -1) {
 		switch (op) {
 		case 'f':
 			filename = optarg;
 			break;
-		case 'p':
+		case 'q':
 			service = optarg;
 			break;
 		case 'x':
@@ -475,6 +493,10 @@ int main(int argc, char **argv)
 			test_end_index = atoi(optarg);
 			break;
 		default:
+			ft_parse_addr_opts(op, optarg, &opts);
+			break;
+		case '?':
+		case 'h':
 			ft_fw_usage(argv[0]);
 			exit(1);
 		}
@@ -485,14 +507,15 @@ int main(int argc, char **argv)
 		exit(1);
 	}
 
-	node = (optind == argc - 1) ? argv[optind] : NULL;
+	opts.dst_addr = (optind == argc - 1) ? argv[optind] : NULL;
 
-	if (node) {
+	if (opts.dst_addr) {
+		opts.dst_port = default_port;
 		series = fts_load(filename);
 		if (!series)
 			exit(1);
 
-		ret = ft_fw_connect(node, service);
+		ret = ft_fw_connect(opts.dst_addr, service);
 		if (ret)
 			goto out;
 
@@ -508,11 +531,14 @@ int main(int argc, char **argv)
 			if (sock < 0) {
 				ret = sock;
 				perror("accept");
+				goto out;
 			}
 
 			op = 1;
-			setsockopt(sock, IPPROTO_TCP, TCP_NODELAY,
-				   (void *) &op, sizeof(op));
+			ret = setsockopt(sock, IPPROTO_TCP, TCP_NODELAY,
+					 (void *) &op, sizeof(op));
+			if (ret)
+				perror("setsockopt");
 
 			ret = ft_fw_server();
 			ft_fw_shutdown(sock);
@@ -521,7 +547,7 @@ int main(int argc, char **argv)
 
 	ft_fw_show_results();
 out:
-	if (node)
+	if (opts.dst_addr)
 		fts_close(series);
 	return ret;
 }

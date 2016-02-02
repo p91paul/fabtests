@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2015 Los Alamos Nat. Security, LLC. All rights reserved.
+ * Copyright (c) 2015 Cisco Systems, Inc.  All rights reserved.
+ * Copyright (c) 2013-2015 Intel Corporation.  All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -22,7 +23,7 @@
  *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
  * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AWV
  * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
  * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
  * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
@@ -30,26 +31,24 @@
  * SOFTWARE.
  */
 
-#ifndef _FABTESTS_OSX_OSD_H_
-#define _FABTESTS_OSX_OSD_H_
-
-#include <sys/time.h>
-#include <time.h>
-
-#define CLOCK_REALTIME 0
-#define CLOCK_REALTIME_COARSE 0
-#define CLOCK_MONOTONIC 0
-
-typedef int clockid_t;
+#ifndef _PINGPONG_SHARED_H_
+#define _PINGPONG_SHARED_H_
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-int clock_gettime(clockid_t clk_id, struct timespec *tp);
+#include <stdbool.h>
+
+#define PONG_OPTS "vP"
+
+void ft_parsepongopts(int op);
+void ft_pongusage(void);
+int pingpong();
+
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif // FABTESTS_OSX_OSD_H
+#endif /* _PINGPONG_SHARED_H_ */

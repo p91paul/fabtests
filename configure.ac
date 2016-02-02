@@ -1,7 +1,7 @@
 dnl Process this file with autoconf to produce a configure script.
 
 AC_PREREQ(2.57)
-AC_INIT([fabtests], [1.0.0], [linux-rdma@vger.kernel.org])
+AC_INIT([fabtests], [1.3.0a1], [ofiwg@lists.openfabrics.org])
 AC_CONFIG_AUX_DIR(config)
 AC_CONFIG_MACRO_DIR(config)
 AC_CONFIG_HEADERS(config.h)
@@ -77,8 +77,9 @@ AC_CHECK_HEADER(valgrind/memcheck.h, [],
     AC_MSG_ERROR([valgrind requested but <valgrind/memcheck.h> not found.]))
 fi
 
-AC_CHECK_FUNC([epoll_create1], [HAVE_EPOLL=1], [HAVE_EPOLL=0])
-AM_CONDITIONAL(HAVE_EPOLL, [test $HAVE_EPOLL -eq 1])
+AC_CHECK_FUNC([epoll_create1], [have_epoll=1], [have_epoll=0])
+AC_DEFINE_UNQUOTED([HAVE_EPOLL], [$have_epoll],
+		   [Defined to 1 if Linux epoll is available])
 
 AC_CONFIG_FILES([Makefile fabtests.spec])
 AC_OUTPUT

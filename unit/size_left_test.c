@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2015 Cisco Systems, Inc.  All rights reserved.
+ * Copyright (c) 2015 Intel Corporation.  All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -46,165 +47,46 @@
 #include "shared.h"
 #include "unit_common.h"
 
+
 #define DEBUG(...) \
 	if (fabtests_debug) { \
 		fprintf(stderr, __VA_ARGS__); \
 	}
 
-#define RX_CQ_DEPTH (128)
-#define TX_CQ_DEPTH (128)
-
 int fabtests_debug = 0;
-
-static struct fi_info *fi, *hints;
-static struct fi_eq_attr eq_attr;
-
-static struct fid_fabric *fabric;
-static struct fid_domain *domain;
-static struct fid_eq *eq;
 
 static char err_buf[512];
 
-/* per-test fixture variables */
-static struct fid_cq *wcq = NULL;
-static struct fid_cq *rcq = NULL;
-static struct fid_av *av = NULL;
 
-/* returns 0 on success or a negative value that can be stringified with
- * fi_strerror on error.
- *
- * Idempotent. */
-static int teardown_ep_fixture(struct fid_ep *ep)
+static void teardown_ep_fixture(void)
 {
-	int teardown_ret;
-	int ret;
-
-	teardown_ret = 0;
-
-	if (ep != NULL) {
-		ret = fi_close(&ep->fid);
-		if (ret != 0) {
-			printf("fi_close(ep) %s\n", fi_strerror(-ret));
-			teardown_ret = ret;
-		}
+	FT_CLOSE_FID(mr);
+	FT_CLOSE_FID(ep);
+	FT_CLOSE_FID(txcq);
+	FT_CLOSE_FID(rxcq);
+	FT_CLOSE_FID(av);
+	if (buf) {
+		free(buf);
+		buf = rx_buf = tx_buf = NULL;
+		buf_size = rx_size = tx_size = 0;
 	}
-	if (wcq != NULL) {
-		ret = fi_close(&wcq->fid);
-		if (ret != 0) {
-			printf("fi_close(wcq) %s\n", fi_strerror(-ret));
-			teardown_ret = ret;
-		}
-	}
-	if (rcq != NULL) {
-		ret = fi_close(&rcq->fid);
-		if (ret != 0) {
-			printf("fi_close(rcq) %s\n", fi_strerror(-ret));
-			teardown_ret = ret;
-		}
-	}
-	if (av != NULL) {
-		ret = fi_close(&av->fid);
-		if (ret != 0) {
-			printf("fi_close(av) %s\n", fi_strerror(-ret));
-			teardown_ret = ret;
-		}
-	}
-
-	return teardown_ret;
 }
 
 /* returns 0 on success or a negative value that can be stringified with
  * fi_strerror on error */
-static int setup_ep_fixture(struct fid_ep **ep_o)
+static int setup_ep_fixture(void)
 {
 	int ret;
-	struct fi_info *myfi;
-	struct fi_av_attr av_attr;
-	struct fi_cq_attr cq_attr;
 
-	assert(ep_o != NULL);
-	ret = 0;
+	ret = ft_alloc_active_res(fi);
+	if (ret)
+		return ret;
 
-	myfi = fi_dupinfo(fi);
-	if (myfi == NULL) {
-		printf("fi_dupinfo returned NULL\n");
-		goto fail;
-	}
+	ret = ft_init_ep();
+	if (ret)
+		return ret;
 
-	ret = fi_endpoint(domain, myfi, ep_o, NULL);
-	if (ret != 0) {
-		printf("fi_endpoint %s\n", fi_strerror(-ret));
-		goto fail;
-	}
-
-	memset(&cq_attr, 0, sizeof cq_attr);
-	cq_attr.format = FI_CQ_FORMAT_CONTEXT;
-	cq_attr.wait_obj = FI_WAIT_NONE;
-	cq_attr.size = TX_CQ_DEPTH;
-
-	ret = fi_cq_open(domain, &cq_attr, &wcq, /*context=*/NULL);
-	if (ret != 0) {
-		printf("fi_cq_open %s\n", fi_strerror(-ret));
-		goto fail;
-	}
-
-	memset(&cq_attr, 0, sizeof cq_attr);
-	cq_attr.format = FI_CQ_FORMAT_CONTEXT;
-	cq_attr.wait_obj = FI_WAIT_NONE;
-	cq_attr.size = RX_CQ_DEPTH;
-
-	ret = fi_cq_open(domain, &cq_attr, &rcq, /*context=*/NULL);
-	if (ret != 0) {
-		printf("fi_cq_open %s\n", fi_strerror(-ret));
-		goto fail;
-	}
-
-	memset(&av_attr, 0, sizeof av_attr);
-	av_attr.type = myfi->domain_attr->av_type ?
-			myfi->domain_attr->av_type : FI_AV_MAP;
-	av_attr.count = 1;
-	av_attr.name = NULL;
-
-	ret = fi_av_open(domain, &av_attr, &av, NULL);
-	if (ret != 0) {
-		printf("fi_av_open %s\n", fi_strerror(-ret));
-		goto fail;
-	}
-
-	ret = fi_ep_bind(*ep_o, &wcq->fid, FI_SEND);
-	if (ret != 0) {
-		printf("fi_ep_bind(wcq) %s\n", fi_strerror(-ret));
-		goto fail;
-	}
-
-	ret = fi_ep_bind(*ep_o, &rcq->fid, FI_RECV);
-	if (ret != 0) {
-		printf("fi_ep_bind(rcq) %s\n", fi_strerror(-ret));
-		goto fail;
-	}
-
-	ret = fi_ep_bind(*ep_o, &av->fid, 0);
-	if (ret != 0) {
-		printf("fi_ep_bind(av) %s\n", fi_strerror(-ret));
-		goto fail;
-	}
-
-	ret = fi_enable(*ep_o);
-	if (ret != 0) {
-		printf("fi_enable %s\n", fi_strerror(-ret));
-		goto fail;
-	}
-
-	if (myfi != NULL) {
-		fi_freeinfo(myfi);
-	}
-	return ret;
-
-fail:
-	if (myfi != NULL) {
-		fi_freeinfo(myfi);
-	}
-	return teardown_ep_fixture(*ep_o);
+	return 0;
 }
 
 static int
@@ -212,12 +94,10 @@ rx_size_left(void)
 {
 	int ret;
 	int testret;
-	struct fid_ep *ep;
 
 	testret = FAIL;
-	ep = NULL;
 
-	ret = setup_ep_fixture(&ep);
+	ret = setup_ep_fixture();
 	if (ret != 0) {
 		printf("failed to setup test fixture: %s\n", fi_strerror(-ret));
 		goto fail;
@@ -230,15 +110,11 @@ rx_size_left(void)
 		goto fail;
 	}
 
-	/* TODO: once fi_rx_attr's size field meaning has been fixed to refer to
-	 * queue depth instead of number of bytes, we can do a little basic
-	 * sanity checking here */
+	/* TODO: add basic sanity checking here */
 
 	testret = PASS;
 fail:
-	ret = teardown_ep_fixture(ep);
-	if (ret != 0)
-		testret = FAIL;
+	teardown_ep_fixture();
 	return testret;
 }
 
@@ -247,13 +123,8 @@ rx_size_left_err(void)
 {
 	int ret;
 	int testret;
-	struct fid_ep *ep;
-	struct fi_info *myfi;
 
 	testret = FAIL;
-	ep = NULL;
-
-	myfi = fi_dupinfo(fi);
 
 	/* datapath operation, not expected to be caught by libfabric */
 #if 0
@@ -263,7 +134,7 @@ rx_size_left_err(void)
 	}
 #endif
 
-	ret = fi_endpoint(domain, myfi, &ep, NULL);
+	ret = fi_endpoint(domain, fi, &ep, NULL);
 	if (ret != 0) {
 		printf("fi_endpoint %s\n", fi_strerror(-ret));
 		goto fail;
@@ -274,15 +145,7 @@ rx_size_left_err(void)
 
 	testret = PASS;
 fail:
-	if (ep != NULL) {
-		ret = fi_close(&ep->fid);
-		if (ret != 0)
-			printf("fi_close %s\n", fi_strerror(-ret));
-		ep = NULL;
-	}
-	if (myfi != NULL) {
-		fi_freeinfo(myfi);
-	}
+	FT_CLOSE_FID(ep);
 	return testret;
 }
 
@@ -291,12 +154,10 @@ tx_size_left(void)
 {
 	int ret;
 	int testret;
-	struct fid_ep *ep;
 
 	testret = FAIL;
-	ep = NULL;
 
-	ret = setup_ep_fixture(&ep);
+	ret = setup_ep_fixture();
 	if (ret != 0) {
 		printf("failed to setup test fixture: %s\n", fi_strerror(-ret));
 		goto fail;
@@ -315,9 +176,7 @@ tx_size_left(void)
 
 	testret = PASS;
 fail:
-	ret = teardown_ep_fixture(ep);
-	if (ret != 0)
-		testret = FAIL;
+	teardown_ep_fixture();
 	return testret;
 }
 
@@ -332,6 +191,10 @@ struct test_entry test_tx_size_left[] = {
 	{ NULL, "" }
 };
 
+/* TODO: Rewrite test to use size_left() during data transfers and check
+ * that posted sends complete when indicated and check for proper failures
+ * when size_left() returns 0.
+ */
 int run_test_set(void)
 {
 	int failed;
@@ -347,21 +210,28 @@ int main(int argc, char **argv)
 {
 	int op, ret;
 	int failed;
+	char *debug_str;
 
-	if (getenv("FABTESTS_DEBUG")) {
-		fabtests_debug = atoi(getenv("FABTESTS_DEBUG"));
+	opts = INIT_OPTS;
+	opts.options |= FT_OPT_SIZE;
+
+	debug_str = getenv("FABTESTS_DEBUG");
+	if (debug_str) {
+		fabtests_debug = atoi(debug_str);
 	}
 
 	hints = fi_allocinfo();
 	if (!hints)
 		exit(1);
 
-	while ((op = getopt(argc, argv, "f:p:")) != -1) {
+	while ((op = getopt(argc, argv, "f:a:")) != -1) {
 		switch (op) {
 		case 'a':
+			free(hints->fabric_attr->name);
 			hints->fabric_attr->name = strdup(optarg);
 			break;
 		case 'f':
+			free(hints->fabric_attr->prov_name);
 			hints->fabric_attr->prov_name = strdup(optarg);
 			break;
 		default:
@@ -374,8 +244,9 @@ int main(int argc, char **argv)
 
 	hints->mode = ~0;
 	hints->ep_attr->type = FI_EP_RDM;
+	hints->caps = FI_MSG;
 
-	ret = fi_getinfo(FI_VERSION(1, 0), NULL, 0, 0, hints, &fi);
+	ret = fi_getinfo(FT_FIVERSION, NULL, 0, 0, hints, &fi);
 	if (ret != 0) {
 		printf("fi_getinfo %s\n", fi_strerror(-ret));
 		exit(-ret);
@@ -385,28 +256,11 @@ int main(int argc, char **argv)
 		fi->fabric_attr->prov_name,
 		fi->fabric_attr->name);
 
-	ret = fi_fabric(fi->fabric_attr, &fabric, NULL);
-	if (ret != 0) {
-		printf("fi_fabric %s\n", fi_strerror(-ret));
-		exit(1);
-	}
-	ret = fi_domain(fabric, fi, &domain, NULL);
-	if (ret != 0) {
-		printf("fi_domain %s\n", fi_strerror(-ret));
-		exit(1);
-	}
+	ret = ft_open_fabric_res();
+	if (ret)
+		return ret;
 
-	eq_attr.size = 1024;
-	eq_attr.wait_obj = FI_WAIT_UNSPEC;
-	ret = fi_eq_open(fabric, &eq_attr, &eq, NULL);
-	if (ret != 0) {
-		printf("fi_eq_open %s\n", fi_strerror(-ret));
-		exit(1);
-	}
-
-	failed =0;
-
-	failed += run_test_set();
+	failed = run_test_set();
 
 	if (failed > 0) {
 		printf("Summary: %d tests failed\n", failed);
@@ -414,27 +268,6 @@ int main(int argc, char **argv)
 		printf("Summary: all tests passed\n");
 	}
 
-	ret = fi_close(&eq->fid);
-	if (ret != 0) {
-		printf("Error %d closing EQ: %s\n", ret, fi_strerror(-ret));
-		exit(1);
-	}
-	ret = fi_close(&domain->fid);
-	if (ret != 0) {
-		printf("Error %d closing domain: %s\n", ret, fi_strerror(-ret));
-		exit(1);
-	}
-	ret = fi_close(&fabric->fid);
-	if (ret != 0) {
-		printf("Error %d closing fabric: %s\n", ret, fi_strerror(-ret));
-		exit(1);
-	}
-	fi_freeinfo(fi);
-	if (ret != 0) {
-		printf("Error %d freeing info: %s\n", ret, fi_strerror(-ret));
-		exit(1);
-	}
-	fi_freeinfo(hints);
-
+	ft_free_res();
 	return (failed > 0);
 }

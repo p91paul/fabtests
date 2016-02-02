@@ -5,11 +5,9 @@ Summary: Test suite for libfabric API
 Group: System Environment/Libraries
 License: GPLv2 or BSD
 Url: http://www.github.com/ofiwg/fabtests
-Source: http://www.openfabrics.org/downloads/fabrics/%{name}-%{version}.tar.bz2
-Prefix: ${_prefix}
+Source: http://www.openfabrics.org/downloads/ofi/%{name}-%{version}.tar.bz2
 Requires: libfabric
-# TODO: Fix the libfabric version for final distribution
-#Requires: libfabric = %{version}
+BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 
 %description
 Fabtests provides a set of examples that uses libfabric - a high-performance fabric software library.

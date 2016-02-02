@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2014 Intel Corporation.  All rights reserved.
+ * Copyright (c) 2013-2015 Intel Corporation.  All rights reserved.
  * Copyright (c) 2014 Cisco Systems, Inc.  All rights reserved.
  *
  * This software is available to you under a choice of one of two
@@ -48,10 +48,6 @@
 #include "unit_common.h"
 #include "shared.h"
 
-struct fi_info *hints;
-
-static struct fid_fabric *fabric;
-static struct fid_eq *eq;
 
 static char err_buf[512];
 
@@ -148,7 +144,7 @@ eq_write_read_self()
 		event = ~0;
 		memset(&entry, 0, sizeof(entry));
 		ret = fi_eq_read(eq, &event, &entry, sizeof(entry),
-				(i & 1) ? 0 : FI_PEEK); 
+				(i & 1) ? 0 : FI_PEEK);
 		if (ret != sizeof(entry)) {
 			sprintf(err_buf, "fi_eq_read ret=%d, %s", ret, fi_strerror(-ret));
 			goto fail;
@@ -182,10 +178,7 @@ eq_write_read_self()
 	testret = PASS;
 
 fail:
-	if (eq != NULL) {
-		fi_close(&eq->fid);
-		eq = NULL;
-	}
+	FT_CLOSE_FID(eq);
 	return testret;
 }
 
@@ -229,10 +222,7 @@ eq_write_overflow()
 	testret = PASS;
 
 fail:
-	if (eq != NULL) {
-		fi_close(&eq->fid);
-		eq = NULL;
-	}
+	FT_CLOSE_FID(eq);
 	return testret;
 }
 
@@ -302,10 +292,7 @@ eq_wait_fd_poll()
 
 	testret = PASS;
 fail:
-	if (eq != NULL) {
-		fi_close(&eq->fid);
-		eq = NULL;
-	}
+	FT_CLOSE_FID(eq);
 	return testret;
 }
 
@@ -319,7 +306,6 @@ eq_wait_fd_sread()
 {
 	struct fi_eq_entry entry;
 	uint32_t event;
-	struct timespec before, after;
 	uint64_t elapsed;
 	int testret;
 	int ret;
@@ -333,7 +319,7 @@ eq_wait_fd_sread()
 	}
 
 	/* timed sread on empty EQ, 2s timeout */
-	clock_gettime(CLOCK_MONOTONIC, &before);
+	ft_start();
 	ret = fi_eq_sread(eq, &event, &entry, sizeof(entry), 2000, 0);
 	if (ret != -FI_EAGAIN) {
 		sprintf(err_buf, "fi_eq_read of empty EQ returned %d", ret);
@@ -341,8 +327,8 @@ eq_wait_fd_sread()
 	}
 
 	/* check timeout accuracy */
-	clock_gettime(CLOCK_MONOTONIC, &after);
-	elapsed = get_elapsed(&before, &after, MILLI);
+	ft_stop();
+	elapsed = get_elapsed(&start, &end, MILLI);
 	if (elapsed < 1500 || elapsed > 2500) {
 		sprintf(err_buf, "fi_eq_sread slept %d ms, expected 2000",
 				(int)elapsed);
@@ -359,7 +345,7 @@ eq_wait_fd_sread()
 	}
 
 	/* timed sread on EQ with event, 2s timeout */
-	clock_gettime(CLOCK_MONOTONIC, &before);
+	ft_start();
 	event = ~0;
 	memset(&entry, 0, sizeof(entry));
 	ret = fi_eq_sread(eq, &event, &entry, sizeof(entry), 2000, 0);
@@ -369,8 +355,8 @@ eq_wait_fd_sread()
 	}
 
 	/* check that no undue waiting occurred */
-	clock_gettime(CLOCK_MONOTONIC, &after);
-	elapsed = get_elapsed(&before, &after, MILLI);
+	ft_stop();
+	elapsed = get_elapsed(&start, &end, MILLI);
 	if (elapsed > 5) {
 		sprintf(err_buf, "fi_eq_sread slept %d ms, expected immediate return",
 				(int)elapsed);
@@ -395,10 +381,7 @@ eq_wait_fd_sread()
 
 	testret = PASS;
 fail:
-	if (eq != NULL) {
-		fi_close(&eq->fid);
-		eq = NULL;
-	}
+	FT_CLOSE_FID(eq);
 	return testret;
 }
 
@@ -414,19 +397,20 @@ struct test_entry test_array[] = {
 int main(int argc, char **argv)
 {
 	int op, ret;
-	struct fi_info *fi;
 	int failed;
 
 	hints = fi_allocinfo();
 	if (!hints)
 		exit(1);
 
-	while ((op = getopt(argc, argv, "f:p:")) != -1) {
+	while ((op = getopt(argc, argv, "f:a:")) != -1) {
 		switch (op) {
 		case 'a':
+			free(hints->fabric_attr->name);
 			hints->fabric_attr->name = strdup(optarg);
 			break;
 		case 'f':
+			free(hints->fabric_attr->prov_name);
 			hints->fabric_attr->prov_name = strdup(optarg);
 			break;
 		default:
@@ -439,7 +423,7 @@ int main(int argc, char **argv)
 
 	hints->mode = ~0;
 
-	ret = fi_getinfo(FI_VERSION(1, 0), NULL, 0, 0, hints, &fi);
+	ret = fi_getinfo(FT_FIVERSION, NULL, 0, 0, hints, &fi);
 	if (ret != 0) {
 		printf("fi_getinfo %s\n", fi_strerror(-ret));
 		exit(-ret);
@@ -460,13 +444,6 @@ int main(int argc, char **argv)
 		printf("Summary: all tests passed\n");
 	}
 
-	ret = fi_close(&fabric->fid);
-	if (ret != 0) {
-		printf("Error %d closing fabric: %s\n", ret, fi_strerror(-ret));
-		exit(1);
-	}
-	fi_freeinfo(fi);
-	fi_freeinfo(hints);
-
+	ft_free_res();
 	exit(failed > 0);
 }

@@ -40,16 +40,55 @@
 #include <rdma/fi_rma.h>
 #include <rdma/fi_cm.h>
 #include <rdma/fi_errno.h>
+#include <rdma/fi_trigger.h>
 #include <shared.h>
 
 
-struct fi_rma_iov local, remote;
+struct fi_triggered_context triggered_ctx;
 
-struct fi_context fi_ctx_write;
-struct fi_context fi_ctx_read;
+static char *welcome_text1 = "Hello1 from Client!";
+static char *welcome_text2 = "Hello2 from Client!";
 
-static char * welcome_text = "Hello from Client!";
+static int rma_write(void *src, size_t size,
+		     void *context, uint64_t flags)
+{
+	int ret;
+	struct fi_msg_rma msg;
+	struct iovec msg_iov;
+	struct fi_rma_iov rma_iov;
+	void *desc = fi_mr_desc(mr);
 
+	msg_iov.iov_base = src;
+	msg_iov.iov_len = size;
+
+	rma_iov.addr = 0;
+	rma_iov.len = size;
+	rma_iov.key = FT_MR_KEY;
+
+	msg.msg_iov = &msg_iov;
+	msg.desc = &desc;
+	msg.iov_count = 1;
+	msg.rma_iov_count = 1;
+	msg.addr = remote_fi_addr;
+	msg.rma_iov = &rma_iov;
+	msg.context = context;
+
+	ret = fi_writemsg(ep, &msg, flags);
+ 	if (ret){
+ 		FT_PRINTERR("fi_write", ret);
+ 		return ret;
+	}
+	return 0;
+ }
+
+static int rma_write_trigger(void *src, size_t size,
+			     struct fid_cntr *cntr, size_t threshold)
+{
+	triggered_ctx.event_type = FI_TRIGGER_THRESHOLD;
+	triggered_ctx.trigger.threshold.cntr = cntr;
+	triggered_ctx.trigger.threshold.threshold = threshold;
+	return rma_write(src, size, &triggered_ctx, FI_TRIGGER);
+}
 
 static int alloc_ep_res(struct fi_info *fi)
 {
@@ -113,28 +152,46 @@ static int run_test(void)
 		return ret;
 
 	if (opts.dst_addr) {
+		sprintf(tx_buf, "%s%s", welcome_text1, welcome_text2);
+
+		fprintf(stdout, "Triggered RMA write to server\n");
+		ret = rma_write_trigger((char *) tx_buf + strlen(welcome_text1),
+					strlen(welcome_text2), txcntr, 2);
+		if (ret)
+			goto out;
+
 		fprintf(stdout, "RMA write to server\n");
-		sprintf(buf, "%s", welcome_text);
-		ret = fi_write(ep, buf, sizeof(char *) * strlen(buf), fi_mr_desc(mr),
-				remote_fi_addr, 0, FT_MR_KEY, &fi_ctx_write);
+		ret = rma_write(tx_buf, strlen(welcome_text1), &tx_ctx, 0);
 		if (ret)
-			return ret;
+			goto out;
 
-		ret = ft_get_tx_comp(++tx_seq);
-		if (ret)
-			return ret;
+		ret = fi_cntr_wait(txcntr, 3, -1);
+		if (ret < 0) {
+			FT_PRINTERR("fi_cntr_wait", ret);
+			goto out;
+		}
 
-		fprintf(stdout, "Received a completion event for RMA write\n");
+		fprintf(stdout, "Received completion events for RMA write operations\n");
 	} else {
-		ret = ft_get_rx_comp(rx_seq);
-		if (ret)
-			return ret;
+		ret = fi_cntr_wait(rxcntr, 3, -1);
+		if (ret < 0) {
+			FT_PRINTERR("fi_cntr_wait", ret);
+			goto out;
+		}
 
 		fprintf(stdout, "Received data from Client: %s\n", (char *) rx_buf);
+		if (strncmp(rx_buf, welcome_text2, strlen(welcome_text2))) {
+			fprintf(stderr, "*** Data corruption\n");
+			ret = -1;
+			goto out;
+		} else {
+			fprintf(stderr, "Data check OK\n");
+			ret = 0;
+		}
 	}
 
-	/* TODO: need support for finalize operation to sync test */
-	return 0;
+out:
+	return ret;
 }
 
 int main(int argc, char **argv)
@@ -143,6 +200,7 @@ int main(int argc, char **argv)
 
 	opts = INIT_OPTS;
 	opts.options = FT_OPT_SIZE | FT_OPT_RX_CNTR | FT_OPT_TX_CNTR;
+	opts.transfer_size = strlen(welcome_text1) + strlen(welcome_text2);
 
 	hints = fi_allocinfo();
 	if (!hints)
@@ -156,7 +214,7 @@ int main(int argc, char **argv)
 			break;
 		case '?':
 		case 'h':
-			ft_usage(argv[0], "A simple RDM client-sever RMA example.");
+			ft_usage(argv[0], "A simple RDM client-sever Triggered RMA example.");
 			return EXIT_FAILURE;
 		}
 	}
@@ -166,7 +224,7 @@ int main(int argc, char **argv)
 
 	hints->domain_attr->mr_mode = FI_MR_SCALABLE;
 	hints->ep_attr->type = FI_EP_RDM;
-	hints->caps = FI_MSG | FI_RMA | FI_RMA_EVENT;
+	hints->caps = FI_MSG | FI_RMA | FI_RMA_EVENT | FI_TRIGGER;
 	hints->mode = FI_CONTEXT | FI_LOCAL_MR;
 
 	ret = run_test();

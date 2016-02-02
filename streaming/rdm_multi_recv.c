@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2014 Intel Corporation.  All rights reserved.
+ * Copyright (c) 2013-2015 Intel Corporation.  All rights reserved.
  *
  * This software is available to you under the BSD license
  * below:
@@ -42,209 +42,106 @@
 #include <shared.h>
 
 // MULTI_BUF_SIZE_FACTOR defines how large the multi recv buffer will be.
-// The minimum value of the factor is 2 which will set the multi recv buffer 
+// The minimum value of the factor is 2 which will set the multi recv buffer
 // size to be twice the size of the send buffer. In order to use FI_MULTI_RECV
 // feature efficiently, we need to have a large recv buffer so that we don't
 // to repost the buffer often to get the remaining data when the buffer is full
 #define MULTI_BUF_SIZE_FACTOR 4
-#define DEFAULT_MULTI_BUF_SIZE 1024*1024
-#define SYNC_DATA_SIZE 16
+#define DEFAULT_MULTI_BUF_SIZE (1024 * 1024)
 
-static struct cs_opts opts;
-static int max_credits = 128;
-static char test_name[10] = "custom";
-static struct timespec start, end;
-static void *send_buf, *multi_recv_buf;
-static size_t max_send_buf_size, multi_buf_size;
+static struct fid_mr *mr_multi_recv;
+struct fi_context ctx_multi_recv[2];
 
-static struct fi_info *fi, *hints;
 
-static struct fid_fabric *fab;
-static struct fid_domain *dom;
-static struct fid_ep *ep;
-static struct fid_cq *rcq, *scq;
-static struct fid_av *av;
-static struct fid_mr *mr, *mr_multi_recv;;
-static void *local_addr, *remote_addr;
-static size_t addrlen = 0;
-static fi_addr_t remote_fi_addr;
-struct fi_ctx_multi_recv *ctx_send;
-struct fi_context fi_ctx_av;
-struct fi_ctx_multi_recv *ctx_multi_recv;
-
-struct fi_ctx_multi_recv {
-	struct fi_context context;
-	int index;
-};
-
-enum data_type {
-	DATA = 1,
-	CONTROL
-};
-
-int wait_for_send_completion(int num_completions)
+int wait_for_recv_completion(int num_completions)
 {
-	int ret;
-	struct fi_cq_data_entry comp = {0};
-	
+	int i, ret;
+	struct fi_cq_data_entry comp;
+
 	while (num_completions > 0) {
-	 	memset(&comp, 0, sizeof(comp));
-		ret = fi_cq_read(scq, &comp, 1);
-		if (ret > 0) {
+		ret = fi_cq_read(rxcq, &comp, 1);
+		if (ret == -FI_EAGAIN)
+			continue;
+
+		if (ret < 0) {
+			FT_PRINTERR("fi_cq_read", ret);
+			return ret;
+		}
+
+		if (comp.len)
 			num_completions--;
-		} else if (ret < 0 && ret != -FI_EAGAIN) {
-			FT_PRINTERR("fi_cq_read", ret);
-			return ret;
-		}
-	}
-	return 0;
-}
 
-int wait_for_recv_completion(void **recv_data, enum data_type type, 
-		int num_completions)
-{
-	int ret;
-	struct fi_cq_data_entry comp = {0};
-	struct fi_ctx_multi_recv *header;
-	int buf_index;
+		if (comp.flags & FI_MULTI_RECV) {
+			i = (comp.op_context == &ctx_multi_recv[0]) ? 0 : 1;
 
-	while (num_completions > 0) {
-	 	memset(&comp, 0, sizeof(comp));
-		ret = fi_cq_read(rcq, &comp, 1);
-		if (ret > 0) {
- 			header = (struct fi_ctx_multi_recv *)comp.op_context;
-			buf_index = header->index;
-			// buffer is used up, post it again
-			if(comp.flags & FI_MULTI_RECV) {
-				ret = fi_recv(ep, multi_recv_buf + 
-						(multi_buf_size/2) * buf_index, 
-						multi_buf_size/2, 
-						fi_mr_desc(mr_multi_recv), 
-						remote_fi_addr, 
-						&ctx_multi_recv[buf_index].context);
-				if (ret) { 
-					FT_PRINTERR("fi_recv", ret);
-					return ret;
-				} 
-			} else {			
-				num_completions--;
-				// check the completion event is for parameter 
-				// exchanging otherwise, do nothing for sync 
-				// data and multi_recv transfer
-				if(type == DATA) {
-					*recv_data = comp.buf;
-				}
+			ret = fi_recv(ep, rx_buf + (rx_size / 2) * i,
+					rx_size / 2, fi_mr_desc(mr_multi_recv),
+					0, &ctx_multi_recv[i]);
+			if (ret) {
+				FT_PRINTERR("fi_recv", ret);
+				return ret;
 			}
-		} else if (ret < 0 && ret != -FI_EAGAIN) {
-			FT_PRINTERR("fi_cq_read", ret);
-			return ret;
 		}
 	}
 	return 0;
-}
-
-static int send_msg(int size)
-{
-	int ret;
-	ctx_send = (struct fi_ctx_multi_recv *) 
-		malloc(sizeof(struct fi_ctx_multi_recv));
-	ret = fi_send(ep, send_buf, (size_t) size, fi_mr_desc(mr), 
-			remote_fi_addr, &ctx_send->context);
-	if (ret) {
-		FT_PRINTERR("fi_send", ret);
-		return ret;
-	}
-
-	ret = wait_for_send_completion(1);
-
-	return ret;
 }
 
 static int sync_test(void)
 {
 	int ret;
-	ret = opts.dst_addr ? send_msg(SYNC_DATA_SIZE) :
-	   	wait_for_recv_completion(NULL, CONTROL, 1);
+
+	ret = opts.dst_addr ? ft_tx(1) : wait_for_recv_completion(1);
 	if (ret)
 		return ret;
 
-	return opts.dst_addr ? wait_for_recv_completion(NULL, CONTROL, 1) : 
-		send_msg(SYNC_DATA_SIZE);
+	ret = opts.dst_addr ? wait_for_recv_completion(1) : ft_tx(1);
+	return ret;
 }
 
+/*
+ * Post buffer as two halves, so that we can repost one half
+ * when the other half is full.
+ */
 static int post_multi_recv_buffer()
 {
-	int ret = 0;
-	int i;
-			
-	ctx_multi_recv = (struct fi_ctx_multi_recv *) 
-		malloc(sizeof(struct fi_ctx_multi_recv) * 2);
+	int ret, i;
 
-	// post buffers into halves so that we can 
-	// repost one half when the other half is full
-	for(i = 0; i < 2; i++) {		
-		ctx_multi_recv[i].index = i;
-		// post buffers for active messages 
-		ret = fi_recv(ep, multi_recv_buf + (multi_buf_size/2) * i,
-			   	multi_buf_size/2, fi_mr_desc(mr_multi_recv), 
-				remote_fi_addr, &ctx_multi_recv[i].context);
-		if (ret) { 
+	for (i = 0; i < 2; i++) {
+		ret = fi_recv(ep, rx_buf + (rx_size / 2) * i,
+				rx_size / 2, fi_mr_desc(mr_multi_recv),
+				0, &ctx_multi_recv[i]);
+		if (ret) {
 			FT_PRINTERR("fi_recv", ret);
 			return ret;
 		}
 	}
 
-	return ret;
-}
-
-static int send_multi_recv_msg()
-{
-	int ret, i;
-	ret = 0;
-	// send multi_recv data based on the transfer size
-	for(i = 0; i < opts.iterations; i++) {
-		ctx_send = (struct fi_ctx_multi_recv *) 
-			malloc(sizeof(struct fi_ctx_multi_recv));
-		ret = fi_send(ep, send_buf, (size_t) opts.transfer_size, 
-				fi_mr_desc(mr), remote_fi_addr, 
-				&ctx_send->context);
-		if (ret) {
-			FT_PRINTERR("fi_send", ret);
-			return ret;
-		}
-		ret = wait_for_send_completion(1);
-	}
-	return ret;
+	return 0;
 }
 
 static int run_test(void)
 {
-	int ret;
-	
+	int ret, i;
+
 	ret = sync_test();
 	if (ret) {
 		fprintf(stderr, "sync_test failed!\n");
 		goto out;
 	}
-	
-	clock_gettime(CLOCK_MONOTONIC, &start);
-	if(opts.dst_addr) {
-		ret = send_multi_recv_msg();
-		if(ret){
-		  fprintf(stderr, "send_multi_recv_msg failed!\n");
-			goto out;
+
+	ft_start();
+	if (opts.dst_addr) {
+		for (i = 0; i < opts.iterations; i++) {
+			ret = ft_tx(opts.transfer_size);
+			if (ret)
+				goto out;
 		}
 	} else {
-		// wait for all the receive completion events for 
-		// multi_recv transfer
-		ret = wait_for_recv_completion(NULL, CONTROL, opts.iterations);
-		if(ret){
-		  fprintf(stderr, "wait_for_recv_completion failed\n");
-			goto out;			
-		}
+		ret = wait_for_recv_completion(opts.iterations);
+		if (ret)
+			goto out;
 	}
-	
-	clock_gettime(CLOCK_MONOTONIC, &end);
+	ft_stop();
 
 	if (opts.machr)
 		show_perf_mr(opts.transfer_size, opts.iterations,
@@ -253,174 +150,67 @@ static int run_test(void)
 		show_perf(test_name, opts.transfer_size, opts.iterations,
 			&start, &end, 1);
 
-	ret = 0;
-
 out:
 	return ret;
 }
 
-static void free_ep_res(void)
+static void free_res(void)
 {
-	if (ep)
-		fi_close(&ep->fid);
-	if (av)
-		fi_close(&av->fid);
-	if (mr)
-		fi_close(&mr->fid);
-	if (mr_multi_recv)
-		fi_close(&mr_multi_recv->fid);
-	if (rcq)
-		fi_close(&rcq->fid);
-	if (scq)
-		fi_close(&scq->fid);
-
-	free(ctx_send);
-	free(ctx_multi_recv);
-	free(send_buf);
-	free(multi_recv_buf);
+	FT_CLOSE_FID(mr_multi_recv);
+	if (tx_buf) {
+		free(tx_buf);
+		tx_buf = NULL;
+	}
+	if (rx_buf) {
+		free(rx_buf);
+		rx_buf = NULL;
+	}
 }
 
 static int alloc_ep_res(struct fi_info *fi)
 {
-	struct fi_cq_attr cq_attr;
-	struct fi_av_attr av_attr;
 	int ret;
-	
-	// size of the local address that needs to be exchanged later
-	int data_size = sizeof(size_t);
 
-	// maximum size of the buffer that needs to allocated
-	max_send_buf_size = MAX(MAX(data_size, SYNC_DATA_SIZE), opts.transfer_size);
-	
-	if(max_send_buf_size > fi->ep_attr->max_msg_size) {
+	tx_size = MAX(FT_MAX_CTRL_MSG, opts.transfer_size);
+	if (tx_size > fi->ep_attr->max_msg_size) {
 		fprintf(stderr, "transfer size is larger than the maximum size "
 				"of the data transfer supported by the provider\n");
-		return -1;		
-	}
-
-	send_buf = malloc(max_send_buf_size);
-	if (!send_buf) {
-		fprintf(stderr, "Cannot allocate send_buf\n");
 		return -1;
 	}
-	
-	ret = fi_mr_reg(dom, send_buf, max_send_buf_size, 0, 0, 0, 0, &mr, NULL);
+
+	tx_buf = malloc(tx_size);
+	if (!tx_buf) {
+		fprintf(stderr, "Cannot allocate tx_buf\n");
+		return -1;
+	}
+
+	ret = fi_mr_reg(domain, tx_buf, tx_size, FI_SEND,
+			0, FT_MR_KEY, 0, &mr, NULL);
 	if (ret) {
 		FT_PRINTERR("fi_mr_reg", ret);
-		goto err1;
+		return ret;
 	}
-	
+
 	// set the multi buffer size to be allocated
-	multi_buf_size = MAX(max_send_buf_size, DEFAULT_MULTI_BUF_SIZE) * 
-		MULTI_BUF_SIZE_FACTOR;
-	multi_recv_buf = malloc(multi_buf_size);
-	if (!multi_recv_buf) {
-		fprintf(stderr, "Cannot allocate multi_recv_buf\n");
-		ret = -1;
-		goto err1;
+	rx_size = MAX(tx_size, DEFAULT_MULTI_BUF_SIZE) * MULTI_BUF_SIZE_FACTOR;
+	rx_buf = malloc(rx_size);
+	if (!rx_buf) {
+		fprintf(stderr, "Cannot allocate rx_buf\n");
+		return -1;
 	}
-	
-	ret = fi_mr_reg(dom, multi_recv_buf, multi_buf_size, 0, 0, 1, 0, 
+
+	ret = fi_mr_reg(domain, rx_buf, rx_size, FI_RECV, 0, FT_MR_KEY + 1, 0,
 			&mr_multi_recv, NULL);
 	if (ret) {
 		FT_PRINTERR("fi_mr_reg", ret);
-		goto err2;
+		return ret;
 	}
 
-	memset(&cq_attr, 0, sizeof cq_attr);
-	cq_attr.format = FI_CQ_FORMAT_DATA;
-	cq_attr.wait_obj = FI_WAIT_NONE;
-	cq_attr.size = max_credits << 1;
-	ret = fi_cq_open(dom, &cq_attr, &scq, NULL);
-	if (ret) {
-		FT_PRINTERR("fi_cq_open", ret);
-		goto err3;
-	}
-	
-	ret = fi_cq_open(dom, &cq_attr, &rcq, NULL);
-	if (ret) {
-		FT_PRINTERR("fi_cq_open", ret);
-		goto err4;
-	}
-
-	memset(&av_attr, 0, sizeof av_attr);
-	av_attr.type = fi->domain_attr->av_type ?
-			fi->domain_attr->av_type : FI_AV_MAP;
-	av_attr.count = 1;
-	av_attr.name = NULL;
-
-	ret = fi_av_open(dom, &av_attr, &av, NULL);
-	if (ret) {
-		FT_PRINTERR("fi_av_open", ret);
-		goto err5;
-	}
-
-	ret = fi_endpoint(dom, fi, &ep, NULL);
-	if (ret) {
-		FT_PRINTERR("fi_endpoint", ret);
-		goto err6;
-	}
-
-	return 0;
-
-err6:
-	fi_close(&av->fid);
-err5:
-	fi_close(&rcq->fid);
-err4:
-	fi_close(&scq->fid);
-err3:
-	fi_close(&mr_multi_recv->fid);	
-err2:
-	free(multi_recv_buf);
-	fi_close(&mr->fid);
-err1:
-	free(send_buf);
-	
-	return ret;
-}
-
-static int set_min_multi_recv()
-{
-	int ret;
-	
-	ret = fi_setopt(&ep->fid, FI_OPT_ENDPOINT, FI_OPT_MIN_MULTI_RECV, 
-			(void *)&max_send_buf_size, sizeof(max_send_buf_size));
-	if(ret)
+	ret = ft_alloc_active_res(fi);
+	if (ret)
 		return ret;
 
 	return 0;
-}
-
-static int bind_ep_res(void)
-{
-	int ret;
-
-	ret = fi_ep_bind(ep, &scq->fid, FI_SEND);
-	if (ret) {
-		FT_PRINTERR("fi_ep_bind", ret);
-		return ret;
-	}
-
-	ret = fi_ep_bind(ep, &rcq->fid, FI_RECV);
-	if (ret) {
-		FT_PRINTERR("fi_ep_bind", ret);
-		return ret;
-	}
-	
-	ret = fi_ep_bind(ep, &av->fid, 0);
-	if (ret) {
-		FT_PRINTERR("fi_ep_bind", ret);
-		return ret;
-	}
-
-	ret = fi_enable(ep);
-	if (ret) {
-		FT_PRINTERR("fi_enable", ret);
-		return ret;
-	}
-
-	return ret;
 }
 
 static int init_fabric(void)
@@ -429,142 +219,71 @@ static int init_fabric(void)
 	char *node, *service;
 	int ret;
 
-	if (opts.dst_addr) {
-		ret = ft_getsrcaddr(opts.src_addr, opts.src_port, hints);
-		if (ret)
-			return ret;
-		node = opts.dst_addr;
-		service = opts.dst_port;
-	} else {
-		node = opts.src_addr;
-		service = opts.src_port;
-		flags = FI_SOURCE;
-	}
+	ret = ft_read_addr_opts(&node, &service, hints, &flags, &opts);
+	if (ret)
+		return ret;
 
 	ret = fi_getinfo(FT_FIVERSION, node, service, flags, hints, &fi);
 	if (ret) {
 		FT_PRINTERR("fi_getinfo", ret);
 		return ret;
 	}
-	
-	/* Get remote address */
-	if (opts.dst_addr) {
-		addrlen = fi->dest_addrlen;
-		remote_addr = malloc(addrlen);
-		memcpy(remote_addr, fi->dest_addr, addrlen);
-	}
-	
+
 	// set FI_MULTI_RECV flag for all recv operations
 	fi->rx_attr->op_flags = FI_MULTI_RECV;
-	
-	ret = fi_fabric(fi->fabric_attr, &fab, NULL);
-	if (ret) {
-		FT_PRINTERR("fi_fabric", ret);
-		goto err0;
-	}
 
-	ret = fi_domain(fab, fi, &dom, NULL);
-	if (ret) {
-		FT_PRINTERR("fi_domain", ret);
-		goto err1;
-	}
+	ret = ft_open_fabric_res();
+	if (ret)
+		return ret;
 
 	ret = alloc_ep_res(fi);
 	if (ret)
-		goto err3;
-	
-	ret = bind_ep_res();
+		return ret;
+
+	ret = ft_init_ep();
 	if (ret)
-		goto err4;
-	
-	// set the value of FI_OPT_MIN_MULTI_RECV which defines the minimum 
-	// receive buffer space available when the receive buffer is 
-	// automatically freed
-	set_min_multi_recv();	
+		return ret;
 
-	// post the initial receive buffers to get MULTI_RECV data
+	ret = fi_setopt(&ep->fid, FI_OPT_ENDPOINT, FI_OPT_MIN_MULTI_RECV,
+			&tx_size, sizeof(tx_size));
+	if (ret)
+		return ret;
+
 	ret = post_multi_recv_buffer();
-
-	if(ret)
-		goto err4;
-	return 0;
-
-err4:
-	free_ep_res();
-err3:
-	fi_close(&dom->fid);
-err1:
-	fi_close(&fab->fid);
-err0:
 	return ret;
 }
 
 static int init_av(void)
 {
+	size_t addrlen;
 	int ret;
-	void *recv_buf = NULL;
-	
-	if (opts.dst_addr) {
-		// Get local address blob. Find the addrlen first. We set 
-		// addrlen as 0 and fi_getname will return the actual addrlen. 
-		addrlen = 0;
-		ret = fi_getname(&ep->fid, local_addr, &addrlen);
-		if (ret != -FI_ETOOSMALL) {
-			FT_PRINTERR("fi_getname", ret);
-			return ret;
-		}
 
-		local_addr = malloc(addrlen);
-		ret = fi_getname(&ep->fid, local_addr, &addrlen);
+	if (opts.dst_addr) {
+		ret = ft_av_insert(av, fi->dest_addr, 1, &remote_fi_addr, 0, NULL);
+		if (ret)
+			return ret;
+
+		addrlen = 64;
+		ret = fi_getname(&ep->fid, tx_buf, &addrlen);
 		if (ret) {
 			FT_PRINTERR("fi_getname", ret);
 			return ret;
 		}
 
-		ret = fi_av_insert(av, remote_addr, 1, &remote_fi_addr, 0, 
-				&fi_ctx_av);
-		if (ret != 1) {
-			FT_PRINTERR("fi_av_insert", ret);
-			return ret;
-		}
-
-		// Send local addr size 
-		memcpy(send_buf, &addrlen, sizeof(size_t));
-		ret = send_msg(sizeof(size_t));
+		ret = ft_tx(addrlen);
 		if (ret)
 			return ret;
-		
-		// Send local addr
-		memcpy(send_buf, local_addr, addrlen);
-		ret = send_msg(addrlen);
-		if (ret)
-			return ret;
-
 	} else {
-		
-		// Get the size of remote address
-		ret = wait_for_recv_completion(&recv_buf, DATA, 1);
+		ret = wait_for_recv_completion(1);
 		if (ret)
 			return ret;
-		memcpy(&addrlen, recv_buf, sizeof(size_t));
 
-		// Get remote address
-		remote_addr = malloc(addrlen);
-		ret = wait_for_recv_completion(&recv_buf, DATA, 1);
+		ret = ft_av_insert(av, rx_buf, 1, &remote_fi_addr, 0, NULL);
 		if (ret)
 			return ret;
-		memcpy(remote_addr, recv_buf, addrlen);
-
-		ret = fi_av_insert(av, remote_addr, 1, &remote_fi_addr, 0, 
-				&fi_ctx_av);
-		if (ret != 1) {
-			FT_PRINTERR("fi_av_insert", ret);
-			return ret;
-		}
-		ret = 0;
 	}
 
-	return ret;
+	return 0;
 }
 
 static int run(void)
@@ -579,24 +298,20 @@ static int run(void)
 	if (ret)
 		goto out;
 
-	ret = run_test();	
-	/* Finalize before closing ep */
-	ft_finalize(ep, scq, rcq, remote_fi_addr);
+	ret = run_test();
+
+	rx_seq++;
+	ft_finalize(fi, ep, txcq, rxcq, remote_fi_addr);
 out:
-	free_ep_res();
-
-	if (dom)
-		fi_close(&dom->fid);
-	if (fab)
-		fi_close(&fab->fid);
-
 	return ret;
 }
 
 int main(int argc, char **argv)
 {
 	int op, ret;
+
 	opts = INIT_OPTS;
+	opts.options |= FT_OPT_SIZE;
 
 	hints = fi_allocinfo();
 	if (!hints)
@@ -622,9 +337,11 @@ int main(int argc, char **argv)
 	hints->caps = FI_MSG | FI_MULTI_RECV;
 	hints->mode = FI_CONTEXT | FI_LOCAL_MR;
 
+	cq_attr.format = FI_CQ_FORMAT_DATA;
+
 	ret = run();
 
-	fi_freeinfo(hints);
-	fi_freeinfo(fi);
+	ft_free_res();
+	free_res();
 	return -ret;
 }

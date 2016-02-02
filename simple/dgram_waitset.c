@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2014 Intel Corporation.  All rights reserved.
+ * Copyright (c) 2013-2015 Intel Corporation.  All rights reserved.
  * Copyright (c) 2015 Cisco Systems, Inc.  All rights reserved.
  *
  * This software is available to you under the BSD license below:
@@ -41,186 +41,25 @@
 #include <rdma/fi_cm.h>
 #include <shared.h>
 
-static struct cs_opts opts;
-static void *buf;
-static size_t buffer_size = 1024;
-static int transfer_size = 1000;
-static int rx_depth = 512;
-
-static struct fi_info *fi, *hints;
-
-static struct fid_fabric *fab;
-static struct fid_domain *dom;
-static struct fid_ep *ep;
-static struct fid_cq *rcq, *scq;
-static struct fid_av *av;
-static struct fid_mr *mr;
-static struct fid_wait *waitset;
-static void *local_addr, *remote_addr;
-static size_t addrlen = 0;
-static fi_addr_t remote_fi_addr;
-struct fi_context fi_ctx_send;
-struct fi_context fi_ctx_recv;
-struct fi_context fi_ctx_av;
-
-static void free_ep_res(void)
-{
-	fi_close(&ep->fid);
-	fi_close(&av->fid);
-	fi_close(&mr->fid);
-	fi_close(&rcq->fid);
-	fi_close(&scq->fid);
-	fi_close(&waitset->fid);
-	free(buf);
-}
 
 static int alloc_ep_res(struct fi_info *fi)
 {
-	struct fi_cq_attr cq_attr;
-	struct fi_av_attr av_attr;
 	struct fi_wait_attr wait_attr;
 	int ret;
 
-	buf = malloc(buffer_size);
-	if (!buf) {
-		perror("malloc");
-		return -1;
-	}
-
-	/* Open a wait set */
 	memset(&wait_attr, 0, sizeof wait_attr);
 	wait_attr.wait_obj = FI_WAIT_UNSPEC;
-	ret = fi_wait_open(fab, &wait_attr, &waitset);
+	ret = fi_wait_open(fabric, &wait_attr, &waitset);
 	if (ret) {
 		FT_PRINTERR("fi_wait_open", ret);
-		goto err1;
+		return ret;
 	}
 
-	memset(&cq_attr, 0, sizeof cq_attr);
-	cq_attr.format = FI_CQ_FORMAT_CONTEXT;
-	cq_attr.wait_obj = FI_WAIT_SET;
-	cq_attr.wait_cond = FI_CQ_COND_NONE;
-	cq_attr.wait_set = waitset;
-	cq_attr.size = rx_depth;
-
-	/* Open completion queue for send completions */
-	ret = fi_cq_open(dom, &cq_attr, &scq, NULL);
-	if (ret) {
-		FT_PRINTERR("fi_cq_open", ret);
-		goto err2;
-	}
-
-	/* Open completion queue for recv completions */
-	ret = fi_cq_open(dom, &cq_attr, &rcq, NULL);
-	if (ret) {
-		FT_PRINTERR("fi_cq_open", ret);
-		goto err3;
-	}
-	
-	/* Register memory */
-	ret = fi_mr_reg(dom, buf, buffer_size, 0, 0, 0, 0, &mr, NULL);
-	if (ret) {
-		FT_PRINTERR("fi_mr_reg", ret);
-		goto err4;
-	}
-
-	memset(&av_attr, 0, sizeof av_attr);
-	av_attr.type = fi->domain_attr->av_type ?
-			fi->domain_attr->av_type : FI_AV_MAP;
-	av_attr.count = 1;
-	av_attr.name = NULL;
-
-	/* Open Address Vector */
-	ret = fi_av_open(dom, &av_attr, &av, NULL);
-	if (ret) {
-		FT_PRINTERR("fi_av_open", ret);
-		goto err5;
-	}
-
-	ret = fi_endpoint(dom, fi, &ep, NULL);
-	if (ret) {
-		FT_PRINTERR("fi_endpoint", ret);
-		goto err6;
-	}
+	ret = ft_alloc_active_res(fi);
+	if (ret)
+		return ret;
 
 	return 0;
-
-err6:
-	fi_close(&av->fid);
-err5:
-	fi_close(&mr->fid);
-err4:
-	fi_close(&rcq->fid);
-err3:
-	fi_close(&scq->fid);
-err2:
-	fi_close(&waitset->fid);
-err1:
-	free(buf);
-	return ret;
-}
-
-static int bind_ep_res(void)
-{
-	int ret;
-
-	/* Bind AV and CQs with endpoint */
-	ret = fi_ep_bind(ep, &scq->fid, FI_SEND);
-	if (ret) {
-		FT_PRINTERR("fi_ep_bind", ret);
-		return ret;
-	}
-
-	ret = fi_ep_bind(ep, &rcq->fid, FI_RECV);
-	if (ret) {
-		FT_PRINTERR("fi_ep_bind", ret);
-		return ret;
-	}
-
-	ret = fi_ep_bind(ep, &av->fid, 0);
-	if (ret) {
-		FT_PRINTERR("fi_ep_bind", ret);
-		return ret;
-	}
-
-	ret = fi_enable(ep);
-	if (ret) {
-		FT_PRINTERR("fi_enable", ret);
-		return ret;
-	}
-
-	return ret;
-}
-
-static int send_msg(int size)
-{
-	int ret;
-
-	ret = fi_send(ep, buf, (size_t) size, fi_mr_desc(mr), remote_fi_addr,
-			&fi_ctx_send);
-	if (ret) {
-		FT_PRINTERR("fi_send", ret);
-		return ret;
-	}
-
-	ret = wait_for_completion(scq, 1);
-
-	return ret;
-}
-
-static int recv_msg(void)
-{
-	int ret;
-
-	ret = fi_recv(ep, buf, buffer_size, fi_mr_desc(mr), 0, &fi_ctx_recv);
-	if (ret) {
-		FT_PRINTERR("fi_recv", ret);
-		return ret;
-	}
-
-	ret = wait_for_completion(rcq, 1);
-
-	return ret;
 }
 
 static int init_fabric(void)
@@ -232,182 +71,91 @@ static int init_fabric(void)
 	ret = ft_read_addr_opts(&node, &service, hints, &flags, &opts);
 	if (ret)
 		return ret;
-	
+
 	ret = fi_getinfo(FT_FIVERSION, node, service, flags, hints, &fi);
 	if (ret) {
 		FT_PRINTERR("fi_getinfo", ret);
 		return ret;
 	}
 
-	/* Get remote address */
-	if (opts.dst_addr) {
-		addrlen = fi->dest_addrlen;
-		remote_addr = malloc(addrlen);
-		memcpy(remote_addr, fi->dest_addr, addrlen);
-	}
+	ret = ft_open_fabric_res();
+	if (ret)
+		return ret;
 
-	ret = fi_fabric(fi->fabric_attr, &fab, NULL);
-	if (ret) {
-		FT_PRINTERR("fi_fabric", ret);
-		goto err0;
-	}
-
-	ret = fi_domain(fab, fi, &dom, NULL);
-	if (ret) {
-		FT_PRINTERR("fi_domain", ret);
-		goto err1;
-	}
-	
 	ret = alloc_ep_res(fi);
 	if (ret)
-		goto err3;
+		return ret;
 
-	ret = bind_ep_res();
+	ret = ft_init_ep();
 	if (ret)
-		goto err4;
+		return ret;
 
 	return 0;
-
-err4:
-	free_ep_res();
-err3:
-	fi_close(&dom->fid);
-err1:
-	fi_close(&fab->fid);
-err0:
-	fi_freeinfo(fi);
-
-	return ret;
-}
-
-static int init_av(void)
-{
-	int ret;
-
-	if (opts.dst_addr) {
-		/* Get local address blob. Find the addrlen first. We set addrlen 
-		 * as 0 and fi_getname will return the actual addrlen. */
-		addrlen = 0;
-		ret = fi_getname(&ep->fid, local_addr, &addrlen);
-		if (ret != -FI_ETOOSMALL) {
-			FT_PRINTERR("fi_getname", ret);
-			return ret;
-		}
-
-		local_addr = malloc(addrlen);
-		ret = fi_getname(&ep->fid, local_addr, &addrlen);
-		if (ret) {
-			FT_PRINTERR("fi_getname", ret);
-			return ret;
-		}
-
-		ret = fi_av_insert(av, remote_addr, 1, &remote_fi_addr, 0, 
-				&fi_ctx_av);
-		if (ret != 1) {
-			FT_PRINTERR("fi_av_insert", ret);
-			return ret;
-		}
-
-		/* Send local addr size and local addr */
-		memcpy(buf, &addrlen, sizeof(size_t));
-		memcpy(buf + sizeof(size_t), local_addr, addrlen);
-		ret = send_msg(sizeof(size_t) + addrlen);
-		if (ret)
-			return ret;
-
-		/* Receive ACK from server */
-		ret = recv_msg();
-		if (ret)
-			return ret;
-	} else {
-		/* Post a recv to get the remote address */
-		ret = recv_msg();
-		if (ret)
-			return ret;
-
-		memcpy(&addrlen, buf, sizeof(size_t));
-		remote_addr = malloc(addrlen);
-		memcpy(remote_addr, buf + sizeof(size_t), addrlen);
-
-		ret = fi_av_insert(av, remote_addr, 1, &remote_fi_addr, 0, 
-				&fi_ctx_av);
-		if (ret != 1) {
-			FT_PRINTERR("fi_av_insert", ret);
-			return ret;
-		}
-
-		/* Send ACK */
-		ret = send_msg(16);
-		if (ret)
-			return ret;
-	}
-
-	return ret;
 }
 
 static int send_recv()
 {
 	struct fi_cq_entry comp;
-	int ret, send_pending = 0, recv_pending = 0;
-
-	fprintf(stdout, "Posting a recv...\n");
-	ret = fi_recv(ep, buf, transfer_size, fi_mr_desc(mr),
-			remote_fi_addr, &fi_ctx_recv);
-	if (ret) {
-		FT_PRINTERR("fi_recv", ret);
-		return ret;
-	}
-	recv_pending++;
+	int ret;
 
 	fprintf(stdout, "Posting a send...\n");
-	ret = fi_send(ep, buf, transfer_size, fi_mr_desc(mr),
-			remote_fi_addr, &fi_ctx_send);
-	if (ret) {
-		FT_PRINTERR("fi_send", ret);
+	ret = ft_post_tx(tx_size);
+	if (ret)
 		return ret;
-	}
-	send_pending++;
 
-	while (send_pending || recv_pending) {
+	while ((tx_cq_cntr < tx_seq) || (rx_cq_cntr < rx_seq)) {
 		/* Wait for completion events on CQs */
 		ret = fi_wait(waitset, -1);
 		if (ret < 0) {
 			FT_PRINTERR("fi_wait", ret);
 			return ret;
 		}
-		
+
 		/* Read the send completion entry */
-		ret = fi_cq_read(scq, &comp, 1);
-		if(ret > 0) {
-			send_pending--;
+		ret = fi_cq_read(txcq, &comp, 1);
+		if (ret > 0) {
+			tx_cq_cntr++;
 			fprintf(stdout, "Received send completion event!\n");
 		} else if (ret < 0 && ret != -FI_EAGAIN) {
 			if (ret == -FI_EAVAIL) {
-				cq_readerr(scq, "scq");
+				ret = ft_cq_readerr(txcq);
 			} else {
 				FT_PRINTERR("fi_cq_read", ret);
 			}
-			
 			return ret;
 		}
-		
+
 		/* Read the recv completion entry */
-		ret = fi_cq_read(rcq, &comp, 1);
-		if(ret > 0) {
-			recv_pending--;
+		ret = fi_cq_read(rxcq, &comp, 1);
+		if (ret > 0) {
+			rx_cq_cntr++;
 			fprintf(stdout, "Received recv completion event!\n");
 		} else if (ret < 0 && ret != -FI_EAGAIN) {
 			if (ret == -FI_EAVAIL) {
-				cq_readerr(rcq, "rcq");
+				ret = ft_cq_readerr(rxcq);
 			} else {
 				FT_PRINTERR("fi_cq_read", ret);
 			}
-
 			return ret;
 		}
 	}
 
 	return 0;
+}
+
+static int run(void)
+{
+	int ret;
+
+	ret = init_fabric();
+	if (ret)
+		return ret;
+
+	ret = ft_init_av();
+	if (ret)
+		return ret;
+
+	return send_recv();
 }
 
 int main(int argc, char **argv)
@@ -415,6 +163,9 @@ int main(int argc, char **argv)
 	int op, ret = 0;
 
 	opts = INIT_OPTS;
+	opts.options |= FT_OPT_SIZE;
+	opts.comp_method = FT_COMP_WAITSET;
+
 	hints = fi_allocinfo();
 	if (!hints)
 		return EXIT_FAILURE;
@@ -434,27 +185,13 @@ int main(int argc, char **argv)
 
 	if (optind < argc)
 		opts.dst_addr = argv[optind];
-	
+
 	hints->ep_attr->type = FI_EP_DGRAM;
 	hints->caps = FI_MSG;
 	hints->mode = FI_CONTEXT | FI_LOCAL_MR;
 
-	ret = init_fabric();
-	if (ret)
-		return -ret;
+	ret = run();
 
-	ret = init_av();
-	if (ret)
-		return ret;
-
-	/* Exchange data */
-	ret = send_recv();
-
-	free_ep_res();
-	fi_close(&dom->fid);
-	fi_close(&fab->fid);
-	fi_freeinfo(hints);
-	fi_freeinfo(fi);
-
-	return ret;
+	ft_free_res();
+	return -ret;
 }

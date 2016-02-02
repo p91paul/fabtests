@@ -32,9 +32,6 @@
 #include "fabtest.h"
 
 
-struct fid_cq *txcq, *rxcq;
-//struct fid_cntr *txcntr, *rxcntr;
-
 static size_t comp_entry_cnt[] = {
 	[FI_CQ_FORMAT_UNSPEC] = 0,
 	[FI_CQ_FORMAT_CONTEXT] = FT_COMP_BUF_SIZE / sizeof(struct fi_cq_entry),
@@ -61,9 +58,9 @@ static int ft_open_cqs(void)
 
 	if (!txcq) {
 		memset(&attr, 0, sizeof attr);
-		attr.format = ft_tx.cq_format;
-		attr.wait_obj = ft_tx.comp_wait;
-		attr.size = ft_tx.max_credits;
+		attr.format = ft_tx_ctrl.cq_format;
+		attr.wait_obj = ft_tx_ctrl.comp_wait;
+		attr.size = ft_tx_ctrl.max_credits;
 
 		ret = fi_cq_open(domain, &attr, &txcq, NULL);
 		if (ret) {
@@ -74,9 +71,9 @@ static int ft_open_cqs(void)
 
 	if (!rxcq) {
 		memset(&attr, 0, sizeof attr);
-		attr.format = ft_rx.cq_format;
-		attr.wait_obj = ft_rx.comp_wait;
-		attr.size = ft_rx.max_credits;
+		attr.format = ft_rx_ctrl.cq_format;
+		attr.wait_obj = ft_rx_ctrl.comp_wait;
+		attr.size = ft_rx_ctrl.max_credits;
 
 		ret = fi_cq_open(domain, &attr, &rxcq, NULL);
 		if (ret) {
@@ -121,53 +118,70 @@ int ft_bind_comp(struct fid_ep *ep, uint64_t flags)
 	return 0;
 }
 
-int ft_comp_rx(void)
+/* Read CQ until there are no more completions */
+#define ft_cq_read(cq_read, cq, buf, count, completions, str, ret, ...)	\
+	do {							\
+		ret = cq_read(cq, buf, count, ##__VA_ARGS__);	\
+		if (ret < 0) {					\
+			if (ret == -FI_EAGAIN)			\
+				break;				\
+			if (ret == -FI_EAVAIL) {		\
+				ret = ft_cq_readerr(cq);	\
+			} else {				\
+				FT_PRINTERR(#cq_read, ret);	\
+			}					\
+			return ret;				\
+		} else {					\
+			completions += ret;			\
+		}						\
+	} while (ret == count)
+
+static int ft_comp_x(struct fid_cq *cq, struct ft_xcontrol *ft_x,
+		const char *x_str, int timeout)
 {
 	uint8_t buf[FT_COMP_BUF_SIZE];
+	struct timespec s, e;
+	int poll_time = 0;
 	int ret;
 
-	do {
-		ret = fi_cq_read(rxcq, buf, comp_entry_cnt[ft_rx.cq_format]);
-		if (ret < 0) {
-			if (ret == -FI_EAGAIN)
-				break;
+	switch(test_info.cq_wait_obj) {
+	case FI_WAIT_NONE:
+		do {
+			if (!poll_time)
+				clock_gettime(CLOCK_MONOTONIC, &s);
 
-			if (ret == -FI_EAVAIL) {
-				cq_readerr(rxcq, "rxcq");
-			} else {
-				FT_PRINTERR("fi_cq_read", ret);
-			}
-			return ret;
-		} else {
-			ft_rx.credits += ret;
-		}
-	} while (ret == comp_entry_cnt[ft_rx.cq_format]);
+			ft_cq_read(fi_cq_read, cq, buf, comp_entry_cnt[ft_x->cq_format],
+					ft_x->credits, x_str, ret);
 
-	return 0;
+			clock_gettime(CLOCK_MONOTONIC, &e);
+			poll_time = get_elapsed(&s, &e, MILLI);
+		} while (ret == -FI_EAGAIN && poll_time < timeout);
+
+		break;
+	case FI_WAIT_UNSPEC:
+	case FI_WAIT_FD:
+	case FI_WAIT_MUTEX_COND:
+		ft_cq_read(fi_cq_sread, cq, buf, comp_entry_cnt[ft_x->cq_format],
+			ft_x->credits, x_str, ret, NULL, timeout);
+		break;
+	case FI_WAIT_SET:
+		FT_ERR("fi_ubertest: Unsupported cq wait object\n");
+		return -1;
+	default:
+		FT_ERR("Unknown cq wait object\n");
+		return -1;
+	}
+
+	return (ret == -FI_EAGAIN && timeout) ? ret : 0;
+}
+
+int ft_comp_rx(int timeout)
+{
+	return ft_comp_x(rxcq, &ft_rx_ctrl, "rxcq", timeout);
 }
 
 
-int ft_comp_tx(void)
+int ft_comp_tx(int timeout)
 {
-	uint8_t buf[FT_COMP_BUF_SIZE];
-	int ret;
-
-	do {
-		ret = fi_cq_read(txcq, buf, comp_entry_cnt[ft_tx.cq_format]);
-		if (ret < 0) {
-			if (ret == -FI_EAGAIN)
-				break;
-
-			if (ret == -FI_EAVAIL) {
-				cq_readerr(txcq, "txcq");
-			} else {
-				FT_PRINTERR("fi_cq_read", ret);
-			}
-			return ret;
-		} else {
-			ft_tx.credits += ret;
-		}
-	} while (ret == comp_entry_cnt[ft_tx.cq_format]);
-
-	return 0;
+	return ft_comp_x(txcq, &ft_tx_ctrl, "txcq", timeout);
 }

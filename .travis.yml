@@ -1,0 +1,24 @@
+sudo: false
+language: c
+compiler:
+    - gcc
+    - clang
+os:
+    - osx
+    - linux
+before_install:
+    - git clone https://github.com/ofiwg/libfabric.git
+    - cd libfabric
+    - ./autogen.sh
+    - ./configure --prefix=$HOME
+    - make
+    - make install
+    - cd ..
+    - export LDFLAGS="-L$HOME/lib"
+    - export CPPFLAGS="-I$HOME/include"
+install:
+    - ./autogen.sh
+    - ./configure --prefix=$HOME
+    - make
+    - make install
+    - make test

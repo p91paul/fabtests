@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2014 Intel Corporation.  All rights reserved.
+ * Copyright (c) 2013-2015 Intel Corporation.  All rights reserved.
  * Copyright (c) 2014 Cisco Systems, Inc.  All rights reserved.
  *
  * This software is available to you under a choice of one of two
@@ -43,6 +43,7 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 #include <inttypes.h>
+#include <limits.h>
 
 #include <rdma/fabric.h>
 #include <rdma/fi_domain.h>
@@ -55,11 +56,6 @@
 
 #define MAX_ADDR 256
 
-struct fi_info *hints = NULL;
-static struct fi_fabric_attr fabric_hints;
-
-static struct fi_info *fi = NULL;
-static struct fid_fabric *fabric = NULL;
 static struct fid_domain **domain_vec = NULL;
 
 /*
@@ -69,23 +65,33 @@ static struct fid_domain **domain_vec = NULL;
 
 int main(int argc, char **argv)
 {
-	int i;
-	int op, ret, num_domains = 1;
+	unsigned long i;
+	int op, ret = 0;
+	unsigned long num_domains = 1;
+	char *ptr;
 
 	hints = fi_allocinfo();
 	if (hints == NULL)
 		exit(EXIT_FAILURE);
 
-	while ((op = getopt(argc, argv, "f:p:n:")) != -1) {
+	while ((op = getopt(argc, argv, "f:a:n:")) != -1) {
 		switch (op) {
 		case 'a':
-			fabric_hints.name = strdup(optarg);
+			free(hints->fabric_attr->name);
+			hints->fabric_attr->name = strdup(optarg);
 			break;
 		case 'n':
-			num_domains = atoi(optarg);
+			errno = 0;
+			num_domains = strtol(optarg, &ptr, 10);
+			if (ptr == optarg || *ptr != '\0' ||
+				((num_domains == LONG_MIN || num_domains == LONG_MAX) && errno == ERANGE)) {
+				fprintf(stderr, "Cannot convert from string to long\n");
+				goto out;
+			}
 			break;
 		case 'f':
-			fabric_hints.prov_name = strdup(optarg);
+			free(hints->fabric_attr->prov_name);
+			hints->fabric_attr->prov_name = strdup(optarg);
 			break;
 		default:
 			printf("usage: %s\n", argv[0]);
@@ -96,76 +102,44 @@ int main(int argc, char **argv)
 		}
 	}
 
-	hints->fabric_attr = &fabric_hints;
 	hints->mode = ~0;
 
-	ret = fi_getinfo(FI_VERSION(1, 0), NULL, 0, 0, hints, &fi);
+	ret = fi_getinfo(FT_FIVERSION, NULL, 0, 0, hints, &fi);
 	if (ret != 0) {
 		printf("fi_getinfo %s\n", fi_strerror(-ret));
-		goto err;
+		goto out;
 	}
 
-	ret = fi_fabric(fi->fabric_attr, &fabric, NULL);
-	if (ret != 0) {
-		printf("fi_fabric %s\n", fi_strerror(-ret));
-		goto err;
-	}
+	ret = ft_open_fabric_res();
+	if (ret)
+		goto out;
 
-	domain_vec = calloc(num_domains,sizeof (struct fid_domain *));
+	domain_vec = calloc(num_domains, sizeof(*domain_vec));
 	if (domain_vec == NULL) {
 		perror("malloc");
-		goto err;
+		goto out;
 	}
 
-	for (i = 0; i < num_domains; i++) {
+	/* Common code will open one domain */
+	for (i = 1; i < num_domains; i++) {
 		ret = fi_domain(fabric, fi, &domain_vec[i], NULL);
 		if (ret != FI_SUCCESS) {
-			printf("fi_domain num %d %s\n", i, fi_strerror(-ret));
-			goto err;
+			printf("fi_domain num %lu %s\n", i, fi_strerror(-ret));
+			break;
 		}
 	}
 
-	for (i = 0; i < num_domains; i++) {
+	while (--i > 0) {
 		ret = fi_close(&domain_vec[i]->fid);
 		if (ret != FI_SUCCESS) {
-			printf("Error %d closing domain num %d: %s\n", ret,
+			printf("Error %d closing domain num %lu: %s\n", ret,
 				i, fi_strerror(-ret));
-			goto err;
+			break;
 		}
-		domain_vec[i] = NULL;
 	}
+
 	free(domain_vec);
-	domain_vec = NULL;
-
-	ret = fi_close(&fabric->fid);
-	if (ret != FI_SUCCESS) {
-		printf("Error %d closing fabric: %s\n", ret, fi_strerror(-ret));
-		exit(EXIT_FAILURE);
-	}
-
-	return ret;
-err:
-	if (domain_vec != NULL) {
-		for (i=0;i<num_domains;i++) {
-			if (domain_vec[i] != NULL) {
-				ret = fi_close(&domain_vec[i]->fid);
-				if (ret != FI_SUCCESS) {
-					printf("Error in cleanup %d closing domain num %d: %s\n",
-					       ret, i, fi_strerror(-ret));
-				}
-				domain_vec[i] = NULL;
-			}
-		}
-		free(domain_vec);
-		domain_vec = NULL;
-	}
-
-	if (fabric != NULL) {
-		ret = fi_close(&fabric->fid);
-		if (ret != FI_SUCCESS) {
-			printf("Error in cleanup %d closing fabric: %s\n", ret,
-			       fi_strerror(-ret));
-		}
-	}
+out:
+	ft_free_res();
 	return -ret;
 }

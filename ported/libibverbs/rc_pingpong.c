@@ -47,6 +47,9 @@
 #include <sys/time.h>
 #include <getopt.h>
 #include <time.h>
+#include <limits.h>
+#include <errno.h>
+
 #include <rdma/fabric.h>
 #include <rdma/fi_endpoint.h>
 #include <rdma/fi_domain.h>
@@ -65,7 +68,6 @@
 	} while (0)
 
 static int page_size;
-static struct cs_opts opts;
 
 enum {
 	PINGPONG_RECV_WCID = 1,
@@ -87,9 +89,27 @@ struct pingpong_context {
 	int			 rx_depth;
 	int			 pending;
 	int			use_event;
+	int			routs;
 };
 
-int pp_close_ctx(struct pingpong_context *ctx);
+
+static int pp_post_recv(struct pingpong_context *ctx, int n)
+{
+	int rc = 0;
+	int i;
+
+
+	for (i = 0; i < n; ++i) {
+		rc = fi_recv(ctx->ep, ctx->buf, ctx->size, fi_mr_desc(ctx->mr),
+			     0, (void *)(uintptr_t)PINGPONG_RECV_WCID);
+		if (rc) {
+			FT_PRINTERR("fi_recv", rc);
+			break;
+		}
+	}
+
+	return i;
+}
 
 static int pp_eq_create(struct pingpong_context *ctx)
 {
@@ -142,27 +162,23 @@ static int pp_listen_ctx(struct pingpong_context *ctx)
 	rc = pp_eq_create(ctx);
 	if (rc) {
 		fprintf(stderr, "Unable to allocate listener resources\n");
-		goto err;
+		return 1;
 	}
 
 	rc = fi_pep_bind(ctx->lep, &ctx->eq->fid, 0);
 	if (rc) {
 		FT_PRINTERR("fi_pep_bind", rc);
-		goto err;
+		return 1;
 	}
 
 	rc = fi_listen(ctx->lep);
 	if (rc) {
 		FT_PRINTERR("fi_listen", rc);
-		goto err;
+		return 1;
 	}
 
 	printf("Listening for incoming connections...\n");
 	return 0;
-
-err:
-	pp_close_ctx(ctx);
-	return 1;
 }
 
 static int pp_accept_ctx(struct pingpong_context *ctx)
@@ -170,80 +186,88 @@ static int pp_accept_ctx(struct pingpong_context *ctx)
 	struct fi_eq_cm_entry entry;
 	uint32_t event;
 	int rc = 0;
-	int rd = 0;
+	ssize_t rd;
 
 	rd = fi_eq_sread(ctx->eq, &event, &entry, sizeof entry, -1, 0);
 	if (rd != sizeof entry) {
-		FT_PRINTERR("fi_eq_sread", rd);
-		goto err;
+		FT_PROCESS_EQ_ERR(rd, ctx->eq, "fi_eq_sread", "listen");
+		return 1;
 	}
 
 	if (event != FI_CONNREQ) {
 		fprintf(stderr, "Unexpected CM event %d\n", event);
-		goto err;
+		return 1;
 	}
 
 	rc = fi_domain(ctx->fabric, entry.info, &ctx->dom, NULL);
 	if (rc) {
 		FT_PRINTERR("fi_fdomain", rc);
-		goto err;
+		return 1;
 	}
 
 
 	rc = fi_mr_reg(ctx->dom, ctx->buf, ctx->size, FI_SEND | FI_RECV, 0, 0, 0, &ctx->mr, NULL);
 	if (rc) {
 		FT_PRINTERR("fi_mr_reg", rc);
-		goto err;
+		return 1;
 	}
 
 	rc = fi_endpoint(ctx->dom, entry.info, &ctx->ep, NULL);
 	if (rc) {
 		FT_PRINTERR("fi_endpoint", rc);
-		goto err;
+		return 1;
 	}
 
 	/* Create event queue */
 	if (pp_cq_create(ctx)) {
 		fprintf(stderr, "Unable to create event queue\n");
-		goto err;
+		return 1;
 	}
 
 	rc = fi_ep_bind(ctx->ep, &ctx->cq->fid, FI_SEND | FI_RECV);
 	if (rc) {
 		FT_PRINTERR("fi_ep_bind", rc);
-		goto err;
+		return 1;
 	}
 
 	rc = fi_ep_bind(ctx->ep, &ctx->eq->fid, 0);
 	if (rc) {
 		FT_PRINTERR("fi_ep_bind", rc);
-		goto err;
+		return 1;
+	}
+
+	rc = fi_enable(ctx->ep);
+	if (rc) {
+		FT_PRINTERR("fi_enable", rc);
+		return EXIT_FAILURE;
+	}
+
+	ctx->routs = pp_post_recv(ctx, ctx->rx_depth);
+	if (ctx->routs < ctx->rx_depth) {
+		FT_ERR("Couldn't post receive (%d)\n", ctx->routs);
+		return 1;
 	}
 
 	rc = fi_accept(ctx->ep, NULL, 0);
 	if (rc) {
 		FT_PRINTERR("fi_accept", rc);
-		goto err;
+		return 1;
 	}
 
 	rd = fi_eq_sread(ctx->eq, &event, &entry, sizeof entry, -1, 0);
 	if (rd != sizeof entry) {
-		FT_PRINTERR("fi_eq_sread", rd);
-		goto err;
+		FT_PROCESS_EQ_ERR(rd, ctx->eq, "fi_eq_sread", "accept");
+		return 1;
 	}
 
 	if (event != FI_CONNECTED) {
 		fprintf(stderr, "Unexpected CM event %d\n", event);
-		goto err;
+		return 1;
 	}
 	printf("Connection accepted\n");
 
 	fi_freeinfo(entry.info);
 	return 0;
-
-err:
-	pp_close_ctx(ctx);
-	return 1;
 }
 
 static int pp_connect_ctx(struct pingpong_context *ctx)
@@ -251,75 +275,84 @@ static int pp_connect_ctx(struct pingpong_context *ctx)
 	struct fi_eq_cm_entry entry;
 	uint32_t event;
 	int rc = 0;
+	ssize_t rd;
 
 	/* Open domain */
 	rc = fi_domain(ctx->fabric, ctx->info, &ctx->dom, NULL);
 	if (rc) {
 		FT_PRINTERR("fi_fdomain", rc);
-		goto err;
+		return 1;
 	}
 
 	if (pp_eq_create(ctx)) {
 		fprintf(stderr, "Unable to create event queue\n");
-		goto err;
+		return 1;
 	}
 	
 	rc = fi_mr_reg(ctx->dom, ctx->buf, ctx->size, FI_SEND | FI_RECV, 0, 0, 0, &ctx->mr, NULL);
 	if (rc) {
 		FT_PRINTERR("fi_mr_reg", rc);
-		goto err;
+		return 1;
 	}
 
 	/* Open endpoint */
 	rc = fi_endpoint(ctx->dom, ctx->info, &ctx->ep, NULL);
 	if (rc) {
 		FT_PRINTERR("fi_endpoint", rc);
-		goto err;
+		return 1;
 	}
 	
 	/* Create event queue */
 	if (pp_cq_create(ctx)) {
 		fprintf(stderr, "Unable to create event queue\n");
-		goto err;
+		return 1;
 	}
 	
 	/* Bind eq to ep */
 	rc = fi_ep_bind(ctx->ep, &ctx->cq->fid, FI_SEND | FI_RECV);
 	if (rc) {
 		FT_PRINTERR("fi_ep_bind", rc);
-		goto err;
+		return 1;
 	}	
 
 	rc = fi_ep_bind(ctx->ep, &ctx->eq->fid, 0);
 	if (rc) {
 		FT_PRINTERR("fi_ep_bind", rc);
-		goto err;
+		return 1;
+	}
+
+	rc = fi_enable(ctx->ep);
+	if (rc) {
+		FT_PRINTERR("fi_enable", rc);
+		return EXIT_FAILURE;
+	}
+
+	ctx->routs = pp_post_recv(ctx, ctx->rx_depth);
+	if (ctx->routs < ctx->rx_depth) {
+		FT_ERR("Couldn't post receive (%d)\n", ctx->routs);
+		return 1;
 	}
 
 	printf("Connecting to server\n");
 	rc = fi_connect(ctx->ep, ctx->info->dest_addr, NULL, 0);
 	if (rc) {
 		FT_PRINTERR("fi_connect", rc);
-		goto err;
+		return 1;
 	}
 
-	rc = fi_eq_sread(ctx->eq, &event, &entry, sizeof entry, -1, 0);
-	if (rc != sizeof entry) {
-		FT_PRINTERR("fi_eq_sread", rc);
-		goto err;
+	rd = fi_eq_sread(ctx->eq, &event, &entry, sizeof entry, -1, 0);
+	if (rd != sizeof entry) {
+		FT_PROCESS_EQ_ERR(rd, ctx->eq, "fi_eq_sread", "connect");
+		return 1;
 	}
 
 	if (event != FI_CONNECTED) {
 		fprintf(stderr, "Unexpected CM event %d\n", event);
-		goto err;
+		return 1;
 	}
 
 	printf("Connection successful\n");
 	return 0;
-
-err:
-	pp_close_ctx(ctx);
-	return 1;
 }
 
 static struct pingpong_context *pp_init_ctx(struct fi_info *info, int size,
@@ -336,10 +369,11 @@ static struct pingpong_context *pp_init_ctx(struct fi_info *info, int size,
 	ctx->size       	= size;
 	ctx->rx_depth   	= rx_depth;
 	ctx->use_event   	= use_event;
+	ctx->routs		= 0;
 
 	if (posix_memalign(&(ctx->buf), page_size, size)) {
 		fprintf(stderr, "Couldn't allocate work buf.\n");
-		goto clean_ctx;
+		goto err1;
 	}
 
 	/* FIXME memset(ctx->buf, 0, size); */
@@ -349,14 +383,15 @@ static struct pingpong_context *pp_init_ctx(struct fi_info *info, int size,
 	rc = fi_fabric(info->fabric_attr, &ctx->fabric, NULL);
 	if (rc) {
 		FT_PRINTERR("fi_fabric", rc);
-		return NULL;
+		goto err2;
 	}
 
 	return ctx;
 
-clean_ctx:
+err2:
+	free(ctx->buf);
+err1:
 	free(ctx);
-
 	return NULL;
 }
 
@@ -372,28 +407,8 @@ int pp_close_ctx(struct pingpong_context *ctx)
 
 	if (ctx->buf)
 		free(ctx->buf);
-	if (ctx)
-		free(ctx);
-
+	free(ctx);
 	return 0;
-}
-
-static int pp_post_recv(struct pingpong_context *ctx, int n)
-{
-	int rc = 0;
-	int i;
-
-
-	for (i = 0; i < n; ++i) {
-		rc = fi_recv(ctx->ep, ctx->buf, ctx->size, fi_mr_desc(ctx->mr),
-			     0, (void *)(uintptr_t)PINGPONG_RECV_WCID);
-		if (rc) {
-			FT_PRINTERR("fi_recv", rc);
-			break;
-		}
-	}
-
-	return i;
 }
 
 static int pp_post_send(struct pingpong_context *ctx)
@@ -423,24 +438,23 @@ static void usage(char *argv0)
 
 int main(int argc, char *argv[])
 {
-	struct 		fi_info				*info;
-	struct 		fi_info 			*hints;
-	uint64_t 	flags 				= 0;
-	char 		*service 			= NULL;
-	char 		*node 				= NULL;
+	uint64_t flags 				= 0;
+	char 	*service 			= NULL;
+	char 	*node 				= NULL;
 	struct pingpong_context *ctx;
 	struct timeval           start, end;
-	int                      size = 4096;
+	unsigned long                      size = 4096;
 	// No provider support yet
 	//enum ibv_mtu		 mtu = IBV_MTU_1024;
 	//size_t					 mtu = 1024;
-	int                      rx_depth = 500;
+	int                      rx_depth_default = 500;
+	int			 rx_depth = 0;
 	int                      iters = 1000;
 	int                      use_event = 0;
-	int                      routs;
 	int                      rcnt, scnt;
-	int						 rc = 0;
+	int			 ret, rc = 0;
 
+	char * ptr;
 	srand48(getpid() * time(NULL));
 
 	opts = INIT_OPTS;
@@ -452,15 +466,21 @@ int main(int argc, char *argv[])
 	while (1) {
 		int c;
 
-		c = getopt(argc, argv, "i:S:m:r:n:e:" ADDR_OPTS INFO_OPTS);
+		c = getopt(argc, argv, "S:m:r:n:eh" ADDR_OPTS INFO_OPTS);
 		if (c == -1)
 			break;
 
 		switch (c) {
 		case 'S':
-			size = strtol(optarg, NULL, 0);
+			errno = 0;
+			size = strtol(optarg, &ptr, 10);
+                        if (ptr == optarg || *ptr != '\0' ||
+				((size == LONG_MIN || size == LONG_MAX) && errno == ERANGE)) {
+                                fprintf(stderr, "Cannot convert from string to long\n");
+				rc = 1;
+                                goto err1;
+                        }
 			break;
-
 		// No provider support yet
 		/*case 'm':
 			mtu = strtol(optarg, NULL, 0);
@@ -507,37 +527,46 @@ int main(int argc, char *argv[])
 	hints->ep_attr->type = FI_EP_MSG;
 	hints->caps = FI_MSG;
 	hints->mode = FI_LOCAL_MR;
-	hints->addr_format = FI_SOCKADDR;
 
 	rc = ft_read_addr_opts(&node, &service, hints, &flags, &opts);
 	if (rc)
-		return 1;
+		return -rc;
 	
-	rc = fi_getinfo(FI_VERSION(1, 0), node, service, flags, hints, &info);
+	rc = fi_getinfo(FT_FIVERSION, node, service, flags, hints, &fi);
 	if (rc) {
 		FT_PRINTERR("fi_getinfo", rc);
 		return -rc;
 	}
 	fi_freeinfo(hints);
 
-	ctx = pp_init_ctx(info, size, rx_depth, use_event);
-	if (!ctx)
-		return 1;
+	if (rx_depth) {
+		if (rx_depth > fi->rx_attr->size) {
+			fprintf(stderr, "rx_depth requested: %d, "
+				"rx_depth supported: %zd\n", rx_depth, fi->rx_attr->size);
+			rc = 1;
+			goto err1;
+		}
+	} else {
+		rx_depth = (rx_depth_default > fi->rx_attr->size) ?
+			fi->rx_attr->size : rx_depth_default;
+	}
+
+	ctx = pp_init_ctx(fi, size, rx_depth, use_event);
+	if (!ctx) {
+		rc = 1;
+		goto err1;
+	}
 
 	if (opts.dst_addr) {
 		/* client connect */
-		if (pp_connect_ctx(ctx))
-			return 1;
+		if (pp_connect_ctx(ctx)) {
+			rc = 1;
+			goto err2;
+		}
 	} else {
 		/* server listen and accept */
 		pp_listen_ctx(ctx);
 		pp_accept_ctx(ctx);
-	}
-
-	routs = pp_post_recv(ctx, ctx->rx_depth);
-	if (routs < ctx->rx_depth) {
-		fprintf(stderr, "Couldn't post receive (%d)\n", routs);
-		return 1;
 	}
 
 	ctx->pending = PINGPONG_RECV_WCID;
@@ -545,14 +574,16 @@ int main(int argc, char *argv[])
 	if (opts.dst_addr) {
 		if (pp_post_send(ctx)) {
 			fprintf(stderr, "Couldn't post send\n");
-			return 1;
+			rc = 1;
+			goto err3;
 		}
 		ctx->pending |= PINGPONG_SEND_WCID;
 	}
 
 	if (gettimeofday(&start, NULL)) {
 		perror("gettimeofday");
-		return 1;
+		rc = 1;
+		goto err3;
 	}
 
 	rcnt = scnt = 0;
@@ -563,7 +594,7 @@ int main(int argc, char *argv[])
 
 		if (use_event) {
 			/* Blocking read */
-			rd = fi_cq_sread(ctx->cq, &wc, sizeof wc, NULL, -1);
+			rd = fi_cq_sread(ctx->cq, &wc, 1, NULL, -1);
 		} else {
 			do {
 				rd = fi_cq_read(ctx->cq, &wc, 1);
@@ -575,7 +606,8 @@ int main(int argc, char *argv[])
 			fprintf(stderr, "cq fi_cq_readerr() %s (%d)\n", 
 				fi_cq_strerror(ctx->cq, cq_err.err, cq_err.err_data, NULL, 0),
 				cq_err.err);
-			return 1;
+			rc = rd;
+			goto err3;
 		}
 
 		switch ((int) (uintptr_t) wc.op_context) {
@@ -584,13 +616,14 @@ int main(int argc, char *argv[])
 			break;
 
 		case PINGPONG_RECV_WCID:
-			if (--routs <= 1) {
-				routs += pp_post_recv(ctx, ctx->rx_depth - routs);
-				if (routs < ctx->rx_depth) {
+			if (--ctx->routs <= 1) {
+				ctx->routs += pp_post_recv(ctx, ctx->rx_depth - ctx->routs);
+				if (ctx->routs < ctx->rx_depth) {
 					fprintf(stderr,
 						"Couldn't post receive (%d)\n",
-						routs);
-					return 1;
+						ctx->routs);
+					rc = 1;
+					goto err3;
 				}
 			}
 
@@ -600,14 +633,16 @@ int main(int argc, char *argv[])
 		default:
 			fprintf(stderr, "Completion for unknown wc_id %d\n",
 				(int) (uintptr_t) wc.op_context);
-			return 1;
+			rc = 1;
+			goto err3;
 		}
 
 		ctx->pending &= ~(int) (uintptr_t) wc.op_context;
 		if (scnt < iters && !ctx->pending) {
 			if (pp_post_send(ctx)) {
 				fprintf(stderr, "Couldn't post send\n");
-				return 1;
+				rc = 1;
+				goto err3;
 			}
 			ctx->pending = PINGPONG_RECV_WCID | PINGPONG_SEND_WCID;
 		}
@@ -615,7 +650,8 @@ int main(int argc, char *argv[])
 
 	if (gettimeofday(&end, NULL)) {
 		perror("gettimeofday");
-		return 1;
+		rc = 1;
+		goto err3;
 	}
 
 	{
@@ -629,10 +665,13 @@ int main(int argc, char *argv[])
 		       iters, usec / 1000000., usec / iters);
 	}
 
-	/* Close the connection */
+err3:
 	fi_shutdown(ctx->ep, 0);
-	if (pp_close_ctx(ctx))
-		return 1;
-
-	return 0;
+err2:
+	ret = pp_close_ctx(ctx);
+	if (!rc)
+		rc = ret;
+err1:
+	fi_freeinfo(fi);
+	return rc;
 }

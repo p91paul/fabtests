@@ -32,24 +32,13 @@
 
 #include "fabtest.h"
 
-static struct timespec start, end;
-
-
-#define FT_CLOSE_FID(fd) \
-	do { \
-		if (fd) { \
-			fi_close(&fd->fid); \
-			fd = NULL; \
-		} \
-	} while (0)
-
 
 void ft_record_error(int error)
 {
-	if (!ft.error) {
+	if (!ft_ctrl.error) {
 		fprintf(stderr, "ERROR [%s], continuing with test",
 			fi_strerror(error));
-		ft.error = error;
+		ft_ctrl.error = error;
 	}
 }
 
@@ -58,10 +47,10 @@ static int ft_init_xcontrol(struct ft_xcontrol *ctrl)
 	memset(ctrl, 0, sizeof *ctrl);
 	ctrl->credits = FT_DEFAULT_CREDITS;
 	ctrl->max_credits =  FT_DEFAULT_CREDITS;
-	ft_rx.comp_wait = FI_WAIT_NONE;
+	ctrl->comp_wait = test_info.cq_wait_obj;
 
-	ctrl->iov = calloc(ft.iov_array[ft.iov_cnt - 1], sizeof *ctrl->iov);
-	ctrl->iov_desc = calloc(ft.iov_array[ft.iov_cnt - 1],
+	ctrl->iov = calloc(ft_ctrl.iov_array[ft_ctrl.iov_cnt - 1], sizeof *ctrl->iov);
+	ctrl->iov_desc = calloc(ft_ctrl.iov_array[ft_ctrl.iov_cnt - 1],
 				sizeof *ctrl->iov_desc);
 	if (!ctrl->iov || !ctrl->iov_desc)
 		return -FI_ENOMEM;
@@ -73,18 +62,18 @@ static int ft_init_rx_control(void)
 {
 	int ret;
 
-	ret= ft_init_xcontrol(&ft_rx);
+	ret= ft_init_xcontrol(&ft_rx_ctrl);
 	if (ret)
 		return ret;
 
-	ft_rx.cq_format = FI_CQ_FORMAT_MSG;
-	ft_rx.addr = FI_ADDR_UNSPEC;
+	ft_rx_ctrl.cq_format = FI_CQ_FORMAT_MSG;
+	ft_rx_ctrl.addr = FI_ADDR_UNSPEC;
 
-	ft_rx.msg_size = med_size_array[med_size_cnt - 1];
+	ft_rx_ctrl.msg_size = med_size_array[med_size_cnt - 1];
 	if (fabric_info && fabric_info->ep_attr &&
 	    fabric_info->ep_attr->max_msg_size &&
-	    fabric_info->ep_attr->max_msg_size < ft_rx.msg_size)
-		ft_rx.msg_size = fabric_info->ep_attr->max_msg_size;
+	    fabric_info->ep_attr->max_msg_size < ft_rx_ctrl.msg_size)
+		ft_rx_ctrl.msg_size = fabric_info->ep_attr->max_msg_size;
 
 	return 0;
 }
@@ -93,11 +82,12 @@ static int ft_init_tx_control(void)
 {
 	int ret;
 
-	ret = ft_init_xcontrol(&ft_tx);
+	ret = ft_init_xcontrol(&ft_tx_ctrl);
 	if (ret)
 		return ret;
 
-	ft_tx.cq_format = FI_CQ_FORMAT_CONTEXT;
+	ft_tx_ctrl.cq_format = FI_CQ_FORMAT_CONTEXT;
+	ft_tx_ctrl.remote_cq_data = ft_init_cq_data(fabric_info);
 	return 0;
 }
 
@@ -105,19 +95,19 @@ static int ft_init_control(void)
 {
 	int ret;
 
-	memset(&ft, 0, sizeof ft);
-	ft.xfer_iter = FT_DEFAULT_CREDITS;
-	ft.inc_step = test_info.test_flags & FT_FLAG_QUICKTEST ? 4 : 1;
+	memset(&ft_ctrl, 0, sizeof ft_ctrl);
+	ft_ctrl.xfer_iter = FT_DEFAULT_CREDITS;
+	ft_ctrl.inc_step = test_info.test_flags & FT_FLAG_QUICKTEST ? 4 : 1;
 
-	ft.iov_array = sm_size_array;
-	ft.iov_cnt = sm_size_cnt;
+	ft_ctrl.iov_array = sm_size_array;
+	ft_ctrl.iov_cnt = sm_size_cnt;
 
 	if (test_info.caps & FI_RMA) {
-		ft.size_array = lg_size_array;
-		ft.size_cnt = lg_size_cnt;
+		ft_ctrl.size_array = lg_size_array;
+		ft_ctrl.size_cnt = lg_size_cnt;
 	} else {
-		ft.size_array = med_size_array;
-		ft.size_cnt = med_size_cnt;
+		ft_ctrl.size_array = med_size_array;
+		ft_ctrl.size_cnt = med_size_cnt;
 	}
 
 	ret = ft_init_rx_control();
@@ -152,12 +142,12 @@ void ft_format_iov(struct iovec *iov, size_t cnt, char *buf, size_t len)
 void ft_next_iov_cnt(struct ft_xcontrol *ctrl, size_t max_iov_cnt)
 {
 	ctrl->iov_iter++;
-	if (ctrl->iov_iter > ft.iov_cnt ||
-	    ft.iov_array[ctrl->iov_iter] > max_iov_cnt)
+	if (ctrl->iov_iter > ft_ctrl.iov_cnt ||
+	    ft_ctrl.iov_array[ctrl->iov_iter] > max_iov_cnt)
 		ctrl->iov_iter = 0;
 }
 
-static int ft_sync(int value)
+static int ft_fw_sync(int value)
 {
 	int result = -FI_EOTHER;
 
@@ -180,7 +170,7 @@ static int ft_sync_test(int value)
 	if (ret)
 		return ret;
 
-	return ft_sync(value);
+	return ft_fw_sync(value);
 }
 
 static int ft_pingpong(void)
@@ -190,7 +180,7 @@ static int ft_pingpong(void)
 	// TODO: current flow will not handle manual progress mode
 	// it can get stuck with both sides receiving
 	if (listen_sock < 0) {
-		for (i = 0; i < ft.xfer_iter; i++) {
+		for (i = 0; i < ft_ctrl.xfer_iter; i++) {
 			ret = ft_send_msg();
 			if (ret)
 				return ret;
@@ -200,7 +190,7 @@ static int ft_pingpong(void)
 				return ret;
 		}
 	} else {
-		for (i = 0; i < ft.xfer_iter; i++) {
+		for (i = 0; i < ft_ctrl.xfer_iter; i++) {
 			ret = ft_recv_msg();
 			if (ret)
 				return ret;
@@ -219,7 +209,7 @@ static int ft_pingpong_dgram(void)
 	int ret, i;
 
 	if (listen_sock < 0) {
-		for (i = 0; i < ft.xfer_iter; i++) {
+		for (i = 0; i < ft_ctrl.xfer_iter; i++) {
 			ret = ft_sendrecv_dgram();
 			if (ret)
 				return ret;
@@ -233,7 +223,7 @@ static int ft_pingpong_dgram(void)
 				return ret;
 		}
 
-		for (i = 0; i < ft.xfer_iter - 1; i++) {
+		for (i = 0; i < ft_ctrl.xfer_iter - 1; i++) {
 			ret = ft_sendrecv_dgram();
 			if (ret)
 				return ret;
@@ -251,13 +241,18 @@ static int ft_run_latency(void)
 {
 	int ret, i;
 
-	for (i = 0; i < ft.size_cnt; i += ft.inc_step) {
-		ft_tx.msg_size = ft.size_array[i];
-		if (ft_tx.msg_size > fabric_info->ep_attr->max_msg_size)
+	for (i = 0; i < ft_ctrl.size_cnt; i += ft_ctrl.inc_step) {
+		ft_tx_ctrl.msg_size = ft_ctrl.size_array[i];
+		if (ft_tx_ctrl.msg_size > fabric_info->ep_attr->max_msg_size)
 			break;
 
-		ft.xfer_iter = test_info.test_flags & FT_FLAG_QUICKTEST ?
-				5 : size_to_count(ft_tx.msg_size);
+		if (((test_info.class_function == FT_FUNC_INJECT) ||
+			(test_info.class_function == FT_FUNC_INJECTDATA)) &&
+			(ft_tx_ctrl.msg_size > fabric_info->tx_attr->inject_size))
+			break;
+
+		ft_ctrl.xfer_iter = test_info.test_flags & FT_FLAG_QUICKTEST ?
+				5 : size_to_count(ft_tx_ctrl.msg_size);
 
 		ret = ft_sync_test(0);
 		if (ret)
@@ -270,7 +265,7 @@ static int ft_run_latency(void)
 		if (ret)
 			return ret;
 
-		show_perf("lat", ft_tx.msg_size, ft.xfer_iter, &start, &end, 2);
+		show_perf("lat", ft_tx_ctrl.msg_size, ft_ctrl.xfer_iter, &start, &end, 2);
 	}
 
 	return 0;
@@ -281,7 +276,7 @@ static int ft_bw(void)
 	int ret, i;
 
 	if (listen_sock < 0) {
-		for (i = 0; i < ft.xfer_iter; i++) {
+		for (i = 0; i < ft_ctrl.xfer_iter; i++) {
 			ret = ft_send_msg();
 			if (ret)
 				return ret;
@@ -291,12 +286,12 @@ static int ft_bw(void)
 		if (ret)
 			return ret;
 	} else {
-		for (i = 0; i < ft.xfer_iter; i += ft_rx.credits) {
+		for (i = 0; i < ft_ctrl.xfer_iter; i += ft_rx_ctrl.credits) {
 			ret = ft_post_recv_bufs();
 			if (ret)
 				return ret;
 
-			ret = ft_comp_rx();
+			ret = ft_comp_rx(0);
 			if (ret)
 				return ret;
                 }
@@ -346,7 +341,7 @@ static int ft_bw_dgram(size_t *recv_cnt)
 		if (ret)
 			return ret;
 
-		ft_tx.seqno = ~0;
+		ft_tx_ctrl.seqno = ~0;
 		ret = ft_sendrecv_dgram();
 	} else {
 		ret = ft_recv_dgram_flood(recv_cnt);
@@ -364,14 +359,19 @@ static int ft_run_bandwidth(void)
 	size_t recv_cnt;
 	int ret, i;
 
-	for (i = 0; i < ft.size_cnt; i += ft.inc_step) {
-		ft_tx.msg_size = ft.size_array[i];
-		if (ft_tx.msg_size > fabric_info->ep_attr->max_msg_size)
+	for (i = 0; i < ft_ctrl.size_cnt; i += ft_ctrl.inc_step) {
+		ft_tx_ctrl.msg_size = ft_ctrl.size_array[i];
+		if (ft_tx_ctrl.msg_size > fabric_info->ep_attr->max_msg_size)
 			break;
 
-		ft.xfer_iter = test_info.test_flags & FT_FLAG_QUICKTEST ?
-				5 : size_to_count(ft_tx.msg_size);
-		recv_cnt = ft.xfer_iter;
+		if (((test_info.class_function == FT_FUNC_INJECT) ||
+			(test_info.class_function == FT_FUNC_INJECTDATA)) &&
+			(ft_tx_ctrl.msg_size > fabric_info->tx_attr->inject_size))
+			break;
+
+		ft_ctrl.xfer_iter = test_info.test_flags & FT_FLAG_QUICKTEST ?
+				5 : size_to_count(ft_tx_ctrl.msg_size);
+		recv_cnt = ft_ctrl.xfer_iter;
 
 		ret = ft_sync_test(0);
 		if (ret)
@@ -384,7 +384,7 @@ static int ft_run_bandwidth(void)
 		if (ret)
 			return ret;
 
-		show_perf("bw", ft_tx.msg_size, recv_cnt, &start, &end, 1);
+		show_perf("bw", ft_tx_ctrl.msg_size, recv_cnt, &start, &end, 1);
 	}
 
 	return 0;
@@ -392,17 +392,10 @@ static int ft_run_bandwidth(void)
 
 static void ft_cleanup(void)
 {
-	FT_CLOSE_FID(ep);
-	FT_CLOSE_FID(pep);
-	FT_CLOSE_FID(rxcq);
-	FT_CLOSE_FID(txcq);
-	FT_CLOSE_FID(av);
-	FT_CLOSE_FID(eq);
-	FT_CLOSE_FID(domain);
-	FT_CLOSE_FID(fabric);
-	ft_cleanup_xcontrol(&ft_rx);
-	ft_cleanup_xcontrol(&ft_tx);
-	memset(&ft, 0, sizeof ft);
+	ft_free_res();
+	ft_cleanup_xcontrol(&ft_rx_ctrl);
+	ft_cleanup_xcontrol(&ft_tx_ctrl);
+	memset(&ft_ctrl, 0, sizeof ft_ctrl);
 }
 
 int ft_run_test()
@@ -424,7 +417,7 @@ int ft_run_test()
 	if (ret)
 		goto cleanup;
 
-	ft_sync(0);
+	ft_fw_sync(0);
 
 	ret = ft_enable_comm();
 	if (ret)
@@ -446,5 +439,5 @@ int ft_run_test()
 cleanup:
 	ft_cleanup();
 
-	return ret ? ret : -ft.error;
+	return ret ? ret : -ft_ctrl.error;
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2014 Intel Corporation.  All rights reserved.
+ * Copyright (c) 2013-2015 Intel Corporation.  All rights reserved.
  * Copyright (c) 2014 Cisco Systems, Inc.  All rights reserved.
  *
  * This software is available to you under a choice of one of two
@@ -55,21 +55,15 @@
 
 #define MAX_ADDR 256
 
-static struct fi_info *hints;
-static struct fi_eq_attr eq_attr;
-
 char *good_address;
 int num_good_addr;
 char *bad_address;
+static char *src_addr_str = NULL;
 
 static enum fi_av_type av_type;
 
-static struct fi_info *fi;
-static struct fid_fabric *fabric;
-static struct fid_domain *domain;
-static struct fid_eq *eq;
-
 static char err_buf[512];
+
 
 static int
 check_eq_readerr(struct fid_eq *eq, fid_t fid, void *context, int index)
@@ -225,7 +219,8 @@ av_create_addr_sockaddr_in(char *first_address, int index, void *addr)
 	}
 
 	hints.ai_family = AF_INET;
-	ret = getaddrinfo(first_address, NULL, &hints, &ai);
+	/* port doesn't matter, set port to discard port */
+	ret = getaddrinfo(first_address, "discard", &hints, &ai);
 	if (ret != 0) {
 		sprintf(err_buf, "getaddrinfo: %s", gai_strerror(ret));
 		return -1;
@@ -336,9 +331,7 @@ av_good_sync()
 
 	testret = PASS;
 fail:
-	if (av != NULL) {
-		fi_close(&av->fid);
-	}
+	FT_CLOSE_FID(av);
 	return testret;
 }
 
@@ -394,9 +387,7 @@ av_bad_sync()
 
 	testret = PASS;
 fail:
-	if (av != NULL) {
-		fi_close(&av->fid);
-	}
+	FT_CLOSE_FID(av);
 	return testret;
 }
 
@@ -467,9 +458,7 @@ av_goodbad_vector_sync()
 
 	testret = PASS;
 fail:
-	if (av != NULL) {
-		fi_close(&av->fid);
-	}
+	FT_CLOSE_FID(av);
 	return testret;
 }
 
@@ -543,9 +532,7 @@ av_good_vector_async()
 
 	testret = PASS;
 fail:
-	if (av != NULL) {
-		fi_close(&av->fid);
-	}
+	FT_CLOSE_FID(av);
 	return testret;
 }
 
@@ -597,9 +584,7 @@ av_zero_async()
 
 	testret = PASS;
 fail:
-	if (av != NULL) {
-		fi_close(&av->fid);
-	}
+	FT_CLOSE_FID(av);
 	return testret;
 }
 
@@ -707,9 +692,7 @@ av_good_2vector_async()
 
 	testret = PASS;
 fail:
-	if (av != NULL) {
-		fi_close(&av->fid);
-	}
+	FT_CLOSE_FID(av);
 	return testret;
 }
 
@@ -807,9 +790,7 @@ av_goodbad_vector_async()
 
 	testret = PASS;
 fail:
-	if (av != NULL) {
-		fi_close(&av->fid);
-	}
+	FT_CLOSE_FID(av);
 	return testret;
 }
 
@@ -960,9 +941,7 @@ av_goodbad_2vector_async()
 
 	testret = PASS;
 fail:
-	if (av != NULL) {
-		fi_close(&av->fid);
-	}
+	FT_CLOSE_FID(av);
 	return testret;
 }
 
@@ -994,7 +973,7 @@ run_test_set()
 	if (bad_address != NULL) {
 		printf("Testing with bad_address = \"%s\"\n", bad_address);
 		failed += run_tests(test_array_bad, err_buf);
-	}	
+	}
 
 	bad_address = NULL;
 	printf("Testing with invalid address\n");
@@ -1012,7 +991,7 @@ int main(int argc, char **argv)
 	if (!hints)
 		return EXIT_FAILURE;
 
-	while ((op = getopt(argc, argv, "f:p:d:D:n:")) != -1) {
+	while ((op = getopt(argc, argv, "f:d:D:n:a:s:")) != -1) {
 		switch (op) {
 		case 'd':
 			good_address = optarg;
@@ -1021,33 +1000,39 @@ int main(int argc, char **argv)
 			bad_address = optarg;
 			break;
 		case 'a':
+			free(hints->fabric_attr->name);
 			hints->fabric_attr->name = strdup(optarg);
 			break;
 		case 'n':
 			num_good_addr = atoi(optarg);
 			break;
 		case 'f':
+			free(hints->fabric_attr->prov_name);
 			hints->fabric_attr->prov_name = strdup(optarg);
+			break;
+		case 's':
+			src_addr_str = optarg;
 			break;
 		default:
 			printf("usage: %s\n", argv[0]);
 			printf("\t[-d good_address]\n");
 			printf("\t[-D bad_address]\n");
 			printf("\t[-a fabric_name]\n");
-			printf("\t[-n num_good_addr (max=%d]\n", MAX_ADDR - 1);
+			printf("\t[-n num_good_addr (max=%d)]\n", MAX_ADDR - 1);
 			printf("\t[-f provider_name]\n");
+			printf("\t[-s source_address]\n");
 			return EXIT_FAILURE;
-			
+
 		}
 	}
 
 	if (good_address == NULL ||  num_good_addr == 0) {
-		printf("Test requires -d  and -n\n");	
+		printf("Test requires -d  and -n\n");
 		return EXIT_FAILURE;
 	}
 
 	if (num_good_addr > MAX_ADDR - 1) {
-		printf("num_good_addr = %d is too big, dropped to %d\n", 
+		printf("num_good_addr = %d is too big, dropped to %d\n",
 				num_good_addr, MAX_ADDR);
 		num_good_addr = MAX_ADDR - 1;
 	}
@@ -1056,39 +1041,24 @@ int main(int argc, char **argv)
 	hints->addr_format = FI_SOCKADDR;
 
 	hints->ep_attr->type = FI_EP_RDM;
-	ret = fi_getinfo(FI_VERSION(1, 0), NULL, 0, 0, hints, &fi);
+	ret = fi_getinfo(FT_FIVERSION, src_addr_str, 0, FI_SOURCE, hints, &fi);
 	if (ret != 0 && ret != -FI_ENODATA) {
 		printf("fi_getinfo %s\n", fi_strerror(-ret));
-		goto err1;
+		goto err;
 	}
 
 	if (ret == -FI_ENODATA) {
 		hints->ep_attr->type = FI_EP_DGRAM;
-		ret = fi_getinfo(FI_VERSION(1, 0), NULL, 0, 0, hints, &fi);
+		ret = fi_getinfo(FT_FIVERSION, src_addr_str, 0, FI_SOURCE, hints, &fi);
 		if (ret != 0) {
 			printf("fi_getinfo %s\n", fi_strerror(-ret));
-			goto err1;
+			goto err;
 		}
 	}
 
-	ret = fi_fabric(fi->fabric_attr, &fabric, NULL);
-	if (ret != 0) {
-		printf("fi_fabric %s\n", fi_strerror(-ret));
-		goto err2;
-	}
-	ret = fi_domain(fabric, fi, &domain, NULL);
-	if (ret != 0) {
-		printf("fi_domain %s\n", fi_strerror(-ret));
-		goto err2;
-	}
-
-	eq_attr.size = 1024;
-	eq_attr.wait_obj = FI_WAIT_UNSPEC;
-	ret = fi_eq_open(fabric, &eq_attr, &eq, NULL);
-	if (ret != 0) {
-		printf("fi_eq_open %s\n", fi_strerror(-ret));
-		goto err2;
-	}
+	ret = ft_open_fabric_res();
+	if (ret)
+		return ret;
 
 	printf("Testing AVs on fabric %s\n", fi->fabric_attr->name);
 	failed = 0;
@@ -1113,28 +1083,9 @@ int main(int argc, char **argv)
 		printf("Summary: all tests passed\n");
 	}
 
-	ret = fi_close(&eq->fid);
-	if (ret != 0) {
-		printf("Error %d closing EQ: %s\n", ret, fi_strerror(-ret));
-		goto err2;
-	}
-	ret = fi_close(&domain->fid);
-	if (ret != 0) {
-		printf("Error %d closing domain: %s\n", ret, fi_strerror(-ret));
-		goto err2;
-	}
-	ret = fi_close(&fabric->fid);
-	if (ret != 0) {
-		printf("Error %d closing fabric: %s\n", ret, fi_strerror(-ret));
-		goto err2;
-	}
-	fi_freeinfo(fi);
-	fi_freeinfo(hints);
-
+	ft_free_res();
 	return (failed > 0);
-err2:
-	fi_freeinfo(fi);
-err1:
-	fi_freeinfo(hints);
+err:
+	ft_free_res();
 	return -ret;
 }

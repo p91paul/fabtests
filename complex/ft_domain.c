@@ -32,12 +32,6 @@
 #include "fabtest.h"
 
 
-struct fid_fabric *fabric;
-struct fid_domain *domain;
-struct fid_eq *eq;
-struct fid_av *av;
-
-
 static int ft_open_fabric(void)
 {
 	int ret;
@@ -67,7 +61,7 @@ static int ft_open_eq(void)
 		return 0;
 
 	memset(&attr, 0, sizeof attr);
-	attr.wait_obj = FI_WAIT_FD;
+	attr.wait_obj = test_info.eq_wait_obj;
 	ret = fi_eq_open(fabric, &attr, &eq, NULL);
 	if (ret)
 		FT_PRINTERR("fi_eq_open", ret);
@@ -96,12 +90,35 @@ ssize_t ft_get_event(uint32_t *event, void *buf, size_t len,
 {
 	ssize_t ret;
 
-	ret = fi_eq_sread(eq, event, buf, len, FT_SREAD_TO, 0);
-	if (ret == -FI_EAVAIL) {
-		return ft_eq_readerr();
-	} else if (ret < 0) {
-		FT_PRINTERR("fi_eq_sread", ret);
-		return ret;
+	switch(test_info.eq_wait_obj) {
+	case FI_WAIT_NONE:
+		do {
+			ret = fi_eq_read(eq, event, buf, len, 0);
+			if (ret == -FI_EAVAIL) {
+				return ft_eq_readerr();
+			} else if (ret < 0 && ret != -FI_EAGAIN) {
+				FT_PRINTERR("fi_eq_read", ret);
+				return ret;
+			}
+		} while (ret == -FI_EAGAIN);
+		break;
+	case FI_WAIT_UNSPEC:
+	case FI_WAIT_FD:
+	case FI_WAIT_MUTEX_COND:
+		ret = fi_eq_sread(eq, event, buf, len, FT_SREAD_TO, 0);
+		if (ret == -FI_EAVAIL) {
+			return ft_eq_readerr();
+		} else if (ret < 0) {
+			FT_PRINTERR("fi_eq_sread", ret);
+			return ret;
+		}
+		break;
+	case FI_WAIT_SET:
+		FT_ERR("fi_ubertest: Unsupported eq wait object\n");
+		return -1;
+	default:
+		FT_ERR("Unknown eq wait object\n");
+		return -1;
 	}
 
 	if (event_check && event_check != *event) {
@@ -164,7 +181,7 @@ static int ft_setup_xcontrol_bufs(struct ft_xcontrol *ctrl)
 	size_t size;
 	int i, ret;
 
-	size = ft.size_array[ft.size_cnt - 1];
+	size = ft_ctrl.size_array[ft_ctrl.size_cnt - 1];
 	if (!ctrl->buf) {
 		ctrl->buf = calloc(1, size);
 		if (!ctrl->buf)
@@ -181,7 +198,7 @@ static int ft_setup_xcontrol_bufs(struct ft_xcontrol *ctrl)
 		ctrl->memdesc = fi_mr_desc(ctrl->mr);
 	}
 
-	for (i = 0; i < ft.iov_cnt; i++)
+	for (i = 0; i < ft_ctrl.iov_cnt; i++)
 		ctrl->iov_desc[i] = ctrl->memdesc;
 
 	return 0;
@@ -191,11 +208,11 @@ static int ft_setup_bufs(void)
 {
 	int ret;
 
-	ret = ft_setup_xcontrol_bufs(&ft_rx);
+	ret = ft_setup_xcontrol_bufs(&ft_rx_ctrl);
 	if (ret)
 		return ret;
 
-	ret = ft_setup_xcontrol_bufs(&ft_tx);
+	ret = ft_setup_xcontrol_bufs(&ft_tx_ctrl);
 	if (ret)
 		return ret;
 

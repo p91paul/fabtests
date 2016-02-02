@@ -47,20 +47,15 @@
 extern "C" {
 #endif
 
-#define FT_SREAD_TO 10000 // milliseconds
+/* Timeouts in milliseconds */
+#define FT_SREAD_TO 		10000
+#define FT_COMP_TO 		10000
+#define FT_DGRAM_POLL_TO	1
 
 extern int listen_sock, sock;
 
-extern struct fid_fabric *fabric;
-extern struct fid_domain *domain;
-extern struct fid_av	 *av;
 //extern struct fid_wait	 *waitset;
 //extern struct fid_poll	 *pollset;
-extern struct fid_eq	 *eq;
-extern struct fid_cq	 *txcq, *rxcq;
-//extern struct fid_cntr	 *txcntr, *rxcntr;
-extern struct fid_ep	 *ep;
-extern struct fid_pep	 *pep;
 //extern struct fid_stx	 *stx;
 //extern struct fid_sep	 *sep;
 
@@ -91,6 +86,7 @@ struct ft_xcontrol {
 	uint8_t			seqno;
 	enum fi_cq_format	cq_format;
 	enum fi_wait_obj	comp_wait;  /* must be NONE */
+	uint64_t		remote_cq_data;
 };
 
 struct ft_control {
@@ -103,17 +99,15 @@ struct ft_control {
 	int			error;
 };
 
-extern struct ft_xcontrol ft_rx, ft_tx;
-extern struct ft_control ft;
-
-/* Test must support all available versions */
-#define FT_VERSION	FI_VERSION(1, 0)
+extern struct ft_xcontrol ft_rx_ctrl, ft_tx_ctrl;
+extern struct ft_control ft_ctrl;
 
 enum {
 	FT_MAX_CAPS		= 64,
 	FT_MAX_EP_TYPES		= 8,
 	FT_MAX_AV_TYPES		= 3,
 	FT_MAX_PROV_MODES	= 4,
+	FT_MAX_WAIT_OBJ		= 5,
 	FT_DEFAULT_CREDITS	= 128,
 	FT_COMP_BUF_SIZE	= 256,
 };
@@ -137,6 +131,8 @@ enum ft_class_function {
 	FT_FUNC_SEND,
 	FT_FUNC_SENDV,
 	FT_FUNC_SENDMSG,
+	FT_FUNC_INJECT,
+	FT_FUNC_INJECTDATA,
 	FT_MAX_FUNCTIONS
 };
 
@@ -151,6 +147,8 @@ struct ft_set {
 	enum fi_ep_type		ep_type[FT_MAX_EP_TYPES];
 	enum fi_av_type		av_type[FT_MAX_AV_TYPES];
 	enum ft_comp_type	comp_type[FT_MAX_COMP];
+	enum fi_wait_obj	eq_wait_obj[FT_MAX_WAIT_OBJ];
+	enum fi_wait_obj	cq_wait_obj[FT_MAX_WAIT_OBJ];
 	uint64_t		mode[FT_MAX_PROV_MODES];
 	uint64_t		caps[FT_MAX_CAPS];
 	uint64_t		test_flags;
@@ -167,6 +165,8 @@ struct ft_series {
 	int			cur_ep;
 	int			cur_av;
 	int			cur_comp;
+	int			cur_eq_wait_obj;
+	int			cur_cq_wait_obj;
 	int			cur_mode;
 	int			cur_caps;
 };
@@ -182,6 +182,8 @@ struct ft_info {
 	enum fi_av_type		av_type;
 	enum fi_ep_type		ep_type;
 	enum ft_comp_type	comp_type;
+	enum fi_wait_obj	eq_wait_obj;
+	enum fi_wait_obj	cq_wait_obj;
 	uint32_t		protocol;
 	uint32_t		protocol_version;
 	char			node[FI_NAME_MAX];
