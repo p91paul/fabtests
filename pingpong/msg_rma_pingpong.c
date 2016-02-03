@@ -167,7 +167,10 @@ static int alloc_ep_res(struct fi_info *fi)
 		FT_PRINTERR("fi_mr_reg", ret);
 		return ret;
 	}
-    written = (volatile int*)fi_mr_desc(mr);
+	if (hints && hints->fabric_attr && hints->fabric_attr->prov && !strcmp(hints->fabric_attr->prov, "dpa"))
+	  written = (volatile int*)fi_mr_desc(mr);
+	else
+	  written = (volatile int*)buf;
 
 	return 0;
 }
