@@ -73,6 +73,7 @@ static int write(void) {
 	  FT_PRINTERR("fi_write", ret);
 	  break;
 	}
+	++tx_seq;
 
 	ret = fi_write(ep, &barrier, sizeof(int), NULL, 0, 0, remote.key, NULL);
 	if (ret)
@@ -167,7 +168,7 @@ static int alloc_ep_res(struct fi_info *fi)
 		FT_PRINTERR("fi_mr_reg", ret);
 		return ret;
 	}
-	if (hints && hints->fabric_attr && hints->fabric_attr->prov && !strcmp(hints->fabric_attr->prov, "dpa"))
+	if (hints && hints->fabric_attr && hints->fabric_attr->prov_name && !strcmp(hints->fabric_attr->prov_name, "dpa"))
 	  written = (volatile int*)fi_mr_desc(mr);
 	else
 	  written = (volatile int*)buf;
