@@ -42,7 +42,6 @@
 
 #include "fabtest.h"
 
-
 int listen_sock = -1;
 int sock = -1;
 static int persistent = 1;
@@ -261,6 +260,8 @@ static void ft_fw_convert_info(struct fi_info *info, struct ft_info *test_info)
 	info->caps = test_info->caps;
 	info->mode = test_info->mode;
 
+	info->domain_attr->av_type = test_info->av_type;
+
 	info->ep_attr->type = test_info->ep_type;
 	info->ep_attr->protocol = test_info->protocol;
 	info->ep_attr->protocol_version = test_info->protocol_version;
@@ -422,6 +423,10 @@ static int ft_fw_client(void)
 		fts_cur_info(series, &test_info);
 		ft_fw_convert_info(hints, &test_info);
 
+		ret = ft_getsrcaddr(opts.src_addr, opts.src_port, hints);
+		if (ret)
+			return ret;
+
 		printf("Starting test %d / %d\n", test_info.test_index, series->test_count);
 		ret = fi_getinfo(FT_FIVERSION, ft_strptr(test_info.node),
 				 ft_strptr(test_info.service), 0, hints, &info);
@@ -457,28 +462,45 @@ static void ft_fw_show_results(void)
 
 static void ft_fw_usage(char *program)
 {
-	fprintf(stderr, "usage: %s [server_node]\n", program);
+	fprintf(stderr, "Usage:\n");
+	fprintf(stderr, "  %s [OPTIONS] \t\t\tstart server\n", program);
+	fprintf(stderr, "  %s [OPTIONS] <server_node> \tconnect to server\n", program);
 	fprintf(stderr, "\nOptions:\n");
-	FT_PRINT_OPTS_USAGE("-f <test_config_file>", "");
 	FT_PRINT_OPTS_USAGE("-q <service_port>", "Management port for test");
-	FT_PRINT_OPTS_USAGE("-p <dst_port>", "destination port number");
+	FT_PRINT_OPTS_USAGE("-h", "display this help output");
+	fprintf(stderr, "\nServer only options:\n");
 	FT_PRINT_OPTS_USAGE("-x", "exit after test run");
+	fprintf(stderr, "\nClient only options:\n");
+	FT_PRINT_OPTS_USAGE("-u <test_config_file>", "config file path (Either config file path or both provider and test config name are required)");
+	FT_PRINT_OPTS_USAGE("-f <provider_name>", " provider name");
+	FT_PRINT_OPTS_USAGE("-t <test_config_name>", "test config name");
 	FT_PRINT_OPTS_USAGE("-y <start_test_index>", "");
 	FT_PRINT_OPTS_USAGE("-z <end_test_index>", "");
-	FT_PRINT_OPTS_USAGE("-h", "display this help output");
+	FT_PRINT_OPTS_USAGE("-s <address>", "source address");
+	FT_PRINT_OPTS_USAGE("-b <src_port>", "non default source port number");
+	FT_PRINT_OPTS_USAGE("-p <dst_port>", "non default destination port number"
+		       " (config file service parameter will override this)");
 }
 
 int main(int argc, char **argv)
 {
 	char *service = "2710";
 	char *filename = NULL;
+	char *provname = NULL;
+	char *testname = NULL;
 	opts = INIT_OPTS;
 	int ret, op;
 
-	while ((op = getopt(argc, argv, "f:q:p:xy:z:h")) != -1) {
+	while ((op = getopt(argc, argv, "f:u:t:q:xy:z:h" ADDR_OPTS)) != -1) {
 		switch (op) {
-		case 'f':
+		case 'u':
 			filename = optarg;
+			break;
+		case 'f':
+			provname = optarg;
+			break;
+		case 't':
+			testname = optarg;
 			break;
 		case 'q':
 			service = optarg;
@@ -510,7 +532,24 @@ int main(int argc, char **argv)
 	opts.dst_addr = (optind == argc - 1) ? argv[optind] : NULL;
 
 	if (opts.dst_addr) {
-		opts.dst_port = default_port;
+		if (!opts.dst_port)
+			opts.dst_port = default_port;
+		if (!filename) {
+			if (!testname || !provname) {
+				ft_fw_usage(argv[0]);
+				exit(1);
+			} else {
+				ret = asprintf(&filename, "%s/test_configs/%s/%s.test",
+					CONFIG_PATH, provname, testname);
+				if (ret == -1) {
+					fprintf(stderr, "asprintf failed!\n");
+					exit(1);
+				}
+			}
+		} else {
+			testname = NULL;
+			provname = NULL;
+		}
 		series = fts_load(filename);
 		if (!series)
 			exit(1);
@@ -549,5 +588,7 @@ int main(int argc, char **argv)
 out:
 	if (opts.dst_addr)
 		fts_close(series);
+	if (filename && !testname && !provname)
+		free(filename);
 	return ret;
 }

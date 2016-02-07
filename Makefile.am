@@ -1,4 +1,5 @@
-AM_CFLAGS = -g -Wall -D_GNU_SOURCE -I$(srcdir)/include
+configdir = $(datarootdir)/${PACKAGE_NAME}
+AM_CFLAGS = -g -Wall -D_GNU_SOURCE -D 'CONFIG_PATH="${configdir}"' -I$(srcdir)/include
 ACLOCAL_AMFLAGS = -I config
 
 bin_PROGRAMS = \
@@ -15,6 +16,7 @@ bin_PROGRAMS = \
 	simple/fi_scalable_ep \
 	simple/fi_rdm_shared_ctx \
 	simple/fi_msg_epoll \
+	simple/fi_rdm_shared_av \
 	streaming/fi_msg_rma \
 	streaming/fi_rdm_atomic \
 	streaming/fi_rdm_multi_recv \
@@ -42,6 +44,18 @@ dist_bin_SCRIPTS = \
 dist_noinst_SCRIPTS = \
 	scripts/parseyaml.py
 
+nobase_dist_config_DATA = \
+        test_configs/eq_cq.test \
+        test_configs/lat_bw.test \
+        test_configs/sockets/all.test \
+        test_configs/sockets/quick.test \
+        test_configs/udp/all.test \
+        test_configs/udp/lat_bw.test \
+        test_configs/udp/quick.test \
+        test_configs/udp/simple.test \
+        test_configs/verbs/all.test \
+        test_configs/verbs/quick.test
+
 noinst_LTLIBRARIES = libfabtests.la
 libfabtests_la_SOURCES = \
 	common/shared.c \
@@ -67,6 +81,10 @@ simple_fi_msg_LDADD = libfabtests.la
 simple_fi_rdm_SOURCES = \
 	simple/rdm.c
 simple_fi_rdm_LDADD = libfabtests.la
+
+simple_fi_rdm_shared_av_SOURCES = \
+	simple/rdm_shared_av.c
+simple_fi_rdm_shared_av_LDADD = libfabtests.la
 
 simple_fi_rdm_rma_simple_SOURCES = \
 	simple/rdm_rma_simple.c
@@ -218,3 +236,4 @@ dist-hook: fabtests.spec
 
 test:
 	./scripts/runfabtests.sh -vvv
+	./scripts/runfabtests.sh -vvv udp

@@ -1,6 +1,5 @@
 /*
- * Copyright (c) 2013-2014 Intel Corporation.  All rights reserved.
- * Copyright (c) 2014 Cisco Systems, Inc.  All rights reserved.
+ * Copyright (c) 2016 Intel Corp, Inc. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -23,7 +22,7 @@
  *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
  * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AWV
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
  * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
  * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
  * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
@@ -31,20 +30,13 @@
  * SOFTWARE.
  */
 
-#ifndef _UNIT_COMMON_H_
-#define _UNIT_COMMON_H_
+#include <sys/endian.h>
+#include <pthread_np.h>
 
-enum { PASS, FAIL, NOTSUPP, SKIPPED };
-#define TEST_ENTRY(NAME) { NAME, #NAME }
 
-#define TEST_RET_VAL(_ret, _testret) \
-	(_ret == -FI_ENOSYS || -ret == -FI_ENODATA) ? SKIPPED : (_testret)
+#define bswap_64 bswap64
 
-struct test_entry {
-	int (*test)();
-	char *name;
-};
+#define ENODATA ENOMSG
+#define HOST_NAME_MAX  128
 
-int run_tests(struct test_entry *test_array, char *err_buf);
-
-#endif /* _UNIT_COMMON_H_ */
+typedef cpuset_t cpu_set_t;
