@@ -278,11 +278,14 @@ static int ft_parse_num(char *str, struct key_t *key, void *buf)
 		TEST_ENUM_SET_N_RETURN(str, FI_WAIT_FD, enum fi_wait_obj, buf);
 		TEST_ENUM_SET_N_RETURN(str, FI_WAIT_MUTEX_COND, enum fi_wait_obj, buf);
 		FT_ERR("Unknown (eq/cq)_wait_obj\n");
-	} else {
+	} else if (!strncmp(key->str, "comp_type", strlen("comp_type"))) {
 		TEST_ENUM_SET_N_RETURN(str, FT_COMP_QUEUE, enum ft_comp_type, buf);
+		TEST_ENUM_SET_N_RETURN(str, FT_COMP_COUNTER, enum ft_comp_type, buf);
+		FT_ERR("Unknown comp_type\n");
+	} else {
 		TEST_SET_N_RETURN(str, "FT_MODE_ALL", FT_MODE_ALL, uint64_t, buf);
 		TEST_SET_N_RETURN(str, "FT_FLAG_QUICKTEST", FT_FLAG_QUICKTEST, uint64_t, buf);
-		FT_ERR("Unknown comp_type/mode/test_flags\n");
+		FT_ERR("Unknown mode/test_flags\n");
 	}
 
 	return -1;

@@ -85,14 +85,48 @@ static int ft_open_cqs(void)
 	return 0;
 }
 
-int ft_open_comp(void)
+
+
+static int ft_open_cntrs(void)
 {
+	struct fi_cntr_attr attr;
 	int ret;
 
-	ret = (test_info.comp_type == FT_COMP_QUEUE) ?
-		ft_open_cqs() : -FI_ENOSYS;
+	if (!txcntr) {
+		memset(&attr, 0, sizeof attr);
+		attr.wait_obj = ft_tx_ctrl.comp_wait;
 
-	return ret;
+		ret = fi_cntr_open(domain, &attr, &txcntr, NULL);
+		if (ret) {
+			FT_PRINTERR("fi_cntr_open", ret);
+			return ret;
+		}
+	}
+
+	if (!rxcntr) {
+		memset(&attr, 0, sizeof attr);
+		attr.wait_obj = ft_rx_ctrl.comp_wait;
+
+		ret = fi_cntr_open(domain, &attr, &rxcntr, NULL);
+		if (ret) {
+			FT_PRINTERR("fi_cntr_open", ret);
+			return ret;
+		}
+	}
+
+	return 0;
+}
+
+int ft_open_comp(void)
+{
+	switch (test_info.comp_type) {
+	case FT_COMP_QUEUE:
+		return ft_open_cqs();
+	case FT_COMP_COUNTER:
+		return ft_open_cntrs();
+	default:
+		return -FI_ENOSYS;
+	}
 }
 
 int ft_bind_comp(struct fid_ep *ep, uint64_t flags)
@@ -100,7 +134,10 @@ int ft_bind_comp(struct fid_ep *ep, uint64_t flags)
 	int ret;
 
 	if (flags & FI_SEND) {
-		ret = fi_ep_bind(ep, &txcq->fid, flags & ~FI_RECV);
+		if (test_info.comp_type == FT_COMP_QUEUE)
+			ret = fi_ep_bind(ep, &txcq->fid, flags & ~FI_RECV);
+		else
+			ret = fi_ep_bind(ep, &txcntr->fid, flags & ~FI_RECV);
 		if (ret) {
 			FT_PRINTERR("fi_ep_bind", ret);
 			return ret;
@@ -108,7 +145,10 @@ int ft_bind_comp(struct fid_ep *ep, uint64_t flags)
 	}
 
 	if (flags & FI_RECV) {
-		ret = fi_ep_bind(ep, &rxcq->fid, flags & ~FI_SEND);
+		if (test_info.comp_type == FT_COMP_QUEUE)
+			ret = fi_ep_bind(ep, &rxcq->fid, flags & ~FI_RECV);
+		else
+			ret = fi_ep_bind(ep, &rxcntr->fid, flags & ~FI_RECV);
 		if (ret) {
 			FT_PRINTERR("fi_ep_bind", ret);
 			return ret;

@@ -115,7 +115,7 @@ enum {
 enum ft_comp_type {
 	FT_COMP_UNSPEC,
 	FT_COMP_QUEUE,
-//	FT_COMP_COUNTER,
+	FT_COMP_COUNTER,
 	FT_MAX_COMP
 };
 
