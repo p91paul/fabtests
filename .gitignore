@@ -23,6 +23,7 @@ ported/libibverbs/fi_*
 ported/librdmacm/fi_*
 
 complex/fabtest
+complex/fi_*
 
 simple/fi_*
 unit/fi_*
