@@ -146,9 +146,9 @@ int ft_bind_comp(struct fid_ep *ep, uint64_t flags)
 
 	if (flags & FI_RECV) {
 		if (test_info.comp_type == FT_COMP_QUEUE)
-			ret = fi_ep_bind(ep, &rxcq->fid, flags & ~FI_RECV);
+			ret = fi_ep_bind(ep, &rxcq->fid, flags & ~FI_SEND);
 		else
-			ret = fi_ep_bind(ep, &rxcntr->fid, flags & ~FI_RECV);
+			ret = fi_ep_bind(ep, &rxcntr->fid, flags & ~FI_SEND);
 		if (ret) {
 			FT_PRINTERR("fi_ep_bind", ret);
 			return ret;
