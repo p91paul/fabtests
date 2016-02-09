@@ -1,8 +1,12 @@
 /*
  * Copyright (c) 2013-2015 Intel Corporation.  All rights reserved.
+ * Copyright (c) 2014 Cisco Systems, Inc.  All rights reserved.
  *
- * This software is available to you under the BSD license
- * below:
+ * This software is available to you under a choice of one of two
+ * licenses.  You may choose to be licensed under the terms of the GNU
+ * General Public License (GPL) Version 2, available from the file
+ * COPYING in the main directory of this source tree, or the
+ * BSD license below:
  *
  *     Redistribution and use in source and binary forms, with or
  *     without modification, are permitted provided that the following
@@ -34,22 +38,22 @@
 #include <time.h>
 #include <netdb.h>
 #include <unistd.h>
+#include <arpa/inet.h>
 
 #include <rdma/fabric.h>
 #include <rdma/fi_errno.h>
 #include <rdma/fi_endpoint.h>
 #include <rdma/fi_cm.h>
-#include <rdma/fi_tagged.h>
 
-#include <shared.h>
+#include "shared.h"
 #include "pingpong_shared.h"
 
 
-static int init_fabric(void)
+static int common_setup(void)
 {
+	int ret;
 	uint64_t flags = 0;
 	char *node, *service;
-	int ret;
 
 	ret = ft_read_addr_opts(&node, &service, hints, &flags, &opts);
 	if (ret)
@@ -82,17 +86,27 @@ static int init_fabric(void)
 
 static int run(void)
 {
-	int i, ret = 0;
+	int i, ret;
 
-	ret = init_fabric();
+	ret = common_setup();
 	if (ret)
 		return ret;
 
+	/* Post an extra receive to avoid lacking a posted receive in the
+	 * finalize.
+	 */
+	ret = fi_recv(ep, rx_buf, rx_size + ft_rx_prefix_size(), fi_mr_desc(mr),
+			0, &rx_ctx);
+
 	if (!(opts.options & FT_OPT_SIZE)) {
 		for (i = 0; i < TEST_CNT; i++) {
-			if (test_size[i].option > opts.size_option)
+			if (!ft_use_size(i, opts.sizes_enabled))
 				continue;
+
 			opts.transfer_size = test_size[i].size;
+			if (opts.transfer_size > fi->ep_attr->max_msg_size)
+				continue;
+
 			init_test(&opts, test_name, sizeof(test_name));
 			ret = pingpong();
 			if (ret)
@@ -112,23 +126,33 @@ out:
 
 int main(int argc, char **argv)
 {
-	int op, ret;
+	int ret, op;
 
 	opts = INIT_OPTS;
+
+	timeout = 5;
 
 	hints = fi_allocinfo();
 	if (!hints)
 		return EXIT_FAILURE;
 
-	while ((op = getopt(argc, argv, "h" CS_OPTS INFO_OPTS)) != -1) {
+	while ((op = getopt(argc, argv, "ht:" CS_OPTS INFO_OPTS PONG_OPTS)) !=
+			-1) {
 		switch (op) {
+		case 't':
+			timeout = atoi(optarg);
+			break;
 		default:
+			ft_parsepongopts(op, optarg);
 			ft_parseinfo(op, optarg, hints);
 			ft_parsecsopts(op, optarg, &opts);
 			break;
 		case '?':
 		case 'h':
-			ft_csusage(argv[0], "Ping pong client and server using tagged messages.");
+			ft_csusage(argv[0], "Ping pong client and server using UD.");
+			ft_pongusage();
+			FT_PRINT_OPTS_USAGE("-t <timeout>",
+					"seconds before timeout on receive");
 			return EXIT_FAILURE;
 		}
 	}
@@ -136,9 +160,11 @@ int main(int argc, char **argv)
 	if (optind < argc)
 		opts.dst_addr = argv[optind];
 
-	hints->ep_attr->type = FI_EP_RDM;
-	hints->caps = FI_TAGGED;
-	hints->mode = FI_LOCAL_MR;
+	hints->ep_attr->type = FI_EP_DGRAM;
+	if (opts.options & FT_OPT_SIZE)
+		hints->ep_attr->max_msg_size = opts.transfer_size;
+	hints->caps = FI_MSG;
+	hints->mode |= FI_LOCAL_MR;
 
 	ret = run();
 

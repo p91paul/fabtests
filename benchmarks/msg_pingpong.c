@@ -178,7 +178,7 @@ static int run(void)
 
 	if (!(opts.options & FT_OPT_SIZE)) {
 		for (i = 0; i < TEST_CNT; i++) {
-			if (test_size[i].option > opts.size_option)
+			if (!ft_use_size(i, opts.sizes_enabled))
 				continue;
 			opts.transfer_size = test_size[i].size;
 			init_test(&opts, test_name, sizeof(test_name));
@@ -213,7 +213,7 @@ int main(int argc, char **argv)
 			-1) {
 		switch (op) {
 		default:
-			ft_parsepongopts(op);
+			ft_parsepongopts(op, optarg);
 			ft_parseinfo(op, optarg, hints);
 			ft_parsecsopts(op, optarg, &opts);
 			break;
