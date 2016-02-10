@@ -176,8 +176,21 @@ int ft_bind_comp(struct fid_ep *ep, uint64_t flags)
 		}						\
 	} while (ret == count)
 
-static int ft_comp_x(struct fid_cq *cq, struct ft_xcontrol *ft_x,
-		const char *x_str, int timeout)
+#define ft_cntr_read(cntr, completions, cur, ret) 	\
+	do {											\
+		int cntr_val = fi_cntr_read(cntr);			\
+		if (cur == cntr_val) {						\
+			ret = -FI_EAGAIN;						\
+			break;									\
+		}											\
+		ret = cur - cntr_val;						\
+		completions += ret;							\
+		cur = cntr_val;								\
+	} while (0)									
+			
+
+static int ft_comp_x(struct fid_cq *cq, struct fid_cntr* cntr, uint64_t* cur, 
+		struct ft_xcontrol *ft_x, const char *x_str, int timeout)
 {
 	uint8_t buf[FT_COMP_BUF_SIZE];
 	struct timespec s, e;
@@ -190,8 +203,12 @@ static int ft_comp_x(struct fid_cq *cq, struct ft_xcontrol *ft_x,
 			if (!poll_time)
 				clock_gettime(CLOCK_MONOTONIC, &s);
 
-			ft_cq_read(fi_cq_read, cq, buf, comp_entry_cnt[ft_x->cq_format],
-					ft_x->credits, x_str, ret);
+			if (test_info.comp_type == FT_COMP_QUEUE)
+				ft_cq_read(fi_cq_read, cq, buf, comp_entry_cnt[ft_x->cq_format],
+						ft_x->credits, x_str, ret);
+			else {
+				ft_cntr_read(cntr, ft_x->credits, (*cur), ret);
+			}
 
 			clock_gettime(CLOCK_MONOTONIC, &e);
 			poll_time = get_elapsed(&s, &e, MILLI);
@@ -201,8 +218,16 @@ static int ft_comp_x(struct fid_cq *cq, struct ft_xcontrol *ft_x,
 	case FI_WAIT_UNSPEC:
 	case FI_WAIT_FD:
 	case FI_WAIT_MUTEX_COND:
-		ft_cq_read(fi_cq_sread, cq, buf, comp_entry_cnt[ft_x->cq_format],
-			ft_x->credits, x_str, ret, NULL, timeout);
+		if (test_info.comp_type == FT_COMP_QUEUE)
+			ft_cq_read(fi_cq_sread, cq, buf, comp_entry_cnt[ft_x->cq_format],
+				ft_x->credits, x_str, ret, NULL, timeout);
+		else {
+			ft_cntr_read(cntr, ft_x->credits, (*cur), ret);
+			if (ret == -FI_EAGAIN) {
+				fi_cntr_wait(cntr, comp_entry_cnt[ft_x->cq_format], timeout);
+				ft_cntr_read(cntr, ft_x->credits, (*cur), ret);
+			}
+		}
 		break;
 	case FI_WAIT_SET:
 		FT_ERR("fi_ubertest: Unsupported cq wait object\n");
@@ -217,11 +242,11 @@ static int ft_comp_x(struct fid_cq *cq, struct ft_xcontrol *ft_x,
 
 int ft_comp_rx(int timeout)
 {
-	return ft_comp_x(rxcq, &ft_rx_ctrl, "rxcq", timeout);
+	return ft_comp_x(rxcq, rxcntr, &rx_cq_cntr, &ft_rx_ctrl, "rxcq", timeout);
 }
 
 
 int ft_comp_tx(int timeout)
 {
-	return ft_comp_x(txcq, &ft_tx_ctrl, "txcq", timeout);
+	return ft_comp_x(txcq, txcntr, &tx_cq_cntr, &ft_tx_ctrl, "txcq", timeout);
 }
