@@ -173,40 +173,49 @@ static int ft_sync_test(int value)
 	return ft_fw_sync(value);
 }
 
+#include "cycle.h"
+uint64_t starts[100000];
+uint64_t ends[100000];
+
 static int ft_pingpong(void)
 {
 	int ret, i;
 
-	// TODO: current flow will not handle manual progress mode
-	// it can get stuck with both sides receiving
-	if (listen_sock < 0) {
-		for (i = 0; i < ft_ctrl.xfer_iter; i++) {
-			ret = ft_send_msg();
-			if (ret)
-				return ret;
+    // TODO: current flow will not handle manual progress mode
+    // it can get stuck with both sides receiving
+    if (listen_sock < 0) {
+      for (i = 0; i < ft_ctrl.xfer_iter; i++) {
+        starts[i] = getticks();
+        ret = ft_send_msg();
+        if (ret)
+          return ret;
+        
+        ret = ft_recv_msg();
+        if (ret)
+          return ret;
+        ends[i] = getticks();
+      }
+    } else {
+      for (i = 0; i < ft_ctrl.xfer_iter; i++) {
+        starts[i] = getticks();
+        ret = ft_recv_msg();
+        if (ret)
+          return ret;
 
-			ret = ft_recv_msg();
-			if (ret)
-				return ret;
-		}
-	} else {
-		for (i = 0; i < ft_ctrl.xfer_iter; i++) {
-			ret = ft_recv_msg();
-			if (ret)
-				return ret;
-
-			ret = ft_send_msg();
-			if (ret)
-				return ret;
-		}
-	}
+        ret = ft_send_msg();
+        if (ret)
+          return ret;
+        ends[i] = getticks();
+        
+      }
+    }
 
 	return 0;
 }
 
 static int ft_pingpong_dgram(void)
 {
-	int ret, i;
+  int ret, i;
 
 	if (listen_sock < 0) {
 		for (i = 0; i < ft_ctrl.xfer_iter; i++) {
@@ -231,7 +240,7 @@ static int ft_pingpong_dgram(void)
 
 		ret = ft_send_dgram();
 		if (ret)
-			return ret;
+          return ret;
 	}
 
 	return 0;
@@ -239,7 +248,7 @@ static int ft_pingpong_dgram(void)
 
 static int ft_run_latency(void)
 {
-	int ret, i;
+  int ret, i;
 
 	for (i = 0; i < ft_ctrl.size_cnt; i += ft_ctrl.inc_step) {
 		ft_tx_ctrl.msg_size = ft_ctrl.size_array[i];
@@ -262,10 +271,32 @@ static int ft_run_latency(void)
 		ret = (test_info.ep_type == FI_EP_DGRAM) ?
 			ft_pingpong_dgram() : ft_pingpong();
 		clock_gettime(CLOCK_MONOTONIC, &end);
-		if (ret)
+		if (ret) {
 			return ret;
-
+			printf("ret %d", ret);
+		}
 		show_perf("lat", ft_tx_ctrl.msg_size, ft_ctrl.xfer_iter, &start, &end, 2);
+        
+	    double sum=0, sum2=0, p90, p95, p99;
+
+		int cmp(const void* x1, const void* x2) {
+		  return *((double*) x1) - *((double*) x2);
+		}
+        double times[100000];
+		for (i = 0; i < ft_ctrl.xfer_iter; i++) {
+          double t = times[i] = elapsed(starts[i], ends[i]) / 2;
+		  sum += times[i];
+		  sum2 += t*t;
+		}
+		qsort(times, ft_ctrl.xfer_iter, sizeof(double), cmp);
+		size_t n = ft_ctrl.xfer_iter;
+		p90 = times[(int)(n * 0.90)];
+		p95 = times[(int)(n * 0.95)];
+		p99 = times[(int)(n * 0.99)];
+		double e_x2 = sum2/n;
+		double ex_2 = (sum/n)*(sum/n);
+		printf("e[x]= %f ; var[x]= %f ; p90= %f ; p95= %f ; p99= %f ; min= %f ; max = %f\n",
+               sum/n, e_x2 - ex_2, p90, p95, p99, times[0], times[n-1]);   
 	}
 
 	return 0;
