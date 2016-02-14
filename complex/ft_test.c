@@ -282,21 +282,37 @@ static int ft_run_latency(void)
 		int cmp(const void* x1, const void* x2) {
 		  return *((double*) x1) - *((double*) x2);
 		}
-        double times[100000];
-		for (i = 0; i < ft_ctrl.xfer_iter; i++) {
-          double t = times[i] = elapsed(starts[i], ends[i]) / 2;
+		size_t n = ft_ctrl.xfer_iter;
+        double times[n];
+		for (i = 0; i < n; i++) {
+          double t = times[i] = (ends[i] - starts[i]) / 2;
 		  sum += times[i];
 		  sum2 += t*t;
 		}
-		qsort(times, ft_ctrl.xfer_iter, sizeof(double), cmp);
-		size_t n = ft_ctrl.xfer_iter;
+		qsort(times, n, sizeof(double), cmp);
 		p90 = times[(int)(n * 0.90)];
 		p95 = times[(int)(n * 0.95)];
 		p99 = times[(int)(n * 0.99)];
+        double ex = sum/n;
 		double e_x2 = sum2/n;
-		double ex_2 = (sum/n)*(sum/n);
-		printf("e[x]= %f ; var[x]= %f ; p90= %f ; p95= %f ; p99= %f ; min= %f ; max = %f\n",
-               sum/n, e_x2 - ex_2, p90, p95, p99, times[0], times[n-1]);   
+		double ex_2 = ex*ex;
+		printf("ticks:    e[x]= %f ; var[x]= %f ; p90= %f ; p95= %f ; p99= %f ; min= %f ; max = %f\n",
+               sum/n, e_x2 - ex_2, p90, p95, p99, times[0], times[n-1]);
+        
+        double avgusec = (float)get_elapsed(&start, &end, MICRO) / n;        
+		for (i = 0; i < ft_ctrl.xfer_iter; i++) {
+          double t = times[i] = times[i] / ex * avgusec;
+		  sum += times[i];
+		  sum2 += t*t;
+		}
+		p90 = times[(int)(n * 0.90)];
+		p95 = times[(int)(n * 0.95)];
+		p99 = times[(int)(n * 0.99)];
+        ex = sum/n;
+		e_x2 = sum2/n;
+		ex_2 = ex*ex;
+		printf("us:    e[x]= %f ; var[x]= %f ; p90= %f ; p95= %f ; p99= %f ; min= %f ; max = %f\n\n",
+               sum/n, e_x2 - ex_2, p90, p95, p99, times[0], times[n-1]);  
 	}
 
 	return 0;
