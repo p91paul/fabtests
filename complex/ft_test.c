@@ -286,7 +286,7 @@ static int ft_run_latency(void)
         double times[n];
 		for (i = 0; i < n; i++) {
           double t = times[i] = (ends[i] - starts[i]) / 2;
-		  sum += times[i];
+		  sum += t;
 		  sum2 += t*t;
 		}
 		qsort(times, n, sizeof(double), cmp);
@@ -302,7 +302,7 @@ static int ft_run_latency(void)
         double avgusec = (float)get_elapsed(&start, &end, MICRO) / n;        
 		for (i = 0; i < ft_ctrl.xfer_iter; i++) {
           double t = times[i] = times[i] / ex * avgusec;
-		  sum += times[i];
+		  sum += t;
 		  sum2 += t*t;
 		}
 		p90 = times[(int)(n * 0.90)];
