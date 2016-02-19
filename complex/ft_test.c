@@ -301,7 +301,7 @@ static int ft_run_latency(void)
 			ex, e_x2 - ex_2, p90, p95, p99, times[0], times[n-1]);
         
 		double elapsed = (float)get_elapsed(&start, &end, MICRO);
-		double ratio = sum / elapsed;
+		double ratio = sum * 2 / elapsed ;
 		sum = sum2 = 0;  
 		for (int i = 0; i < n; i++) {
 			double t = times[i] = times[i] / ratio;
