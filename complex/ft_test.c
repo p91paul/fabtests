@@ -285,7 +285,7 @@ static int ft_run_latency(void)
 		}
 		size_t n = ft_ctrl.xfer_iter;
 		double times[n];
-		for (i = 0; i < n; i++) {
+		for (int i = 0; i < n; i++) {
 			double t = times[i] = (ends[i] - starts[i]) / 2;
 			sum += t;
 			sum2 += t*t;
@@ -298,10 +298,10 @@ static int ft_run_latency(void)
 		double e_x2 = sum2/n;
 		double ex_2 = ex*ex;
 		printf("ticks:    e[x]= %f ; var[x]= %f ; p90= %f ; p95= %f ; p99= %f ; min= %f ; max = %f\n",
-			sum/n, e_x2 - ex_2, p90, p95, p99, times[0], times[n-1]);
+			ex, e_x2 - ex_2, p90, p95, p99, times[0], times[n-1]);
         
 		double avgusec = (float)get_elapsed(&start, &end, MICRO) / n;        
-		for (i = 0; i < ft_ctrl.xfer_iter; i++) {
+		for (int i = 0; i < n; i++) {
 			double t = times[i] = times[i] / ex * avgusec;
 			sum += t;
 			sum2 += t*t;
@@ -313,7 +313,7 @@ static int ft_run_latency(void)
 		e_x2 = sum2/n;
 		ex_2 = ex*ex;
 		printf("us:    e[x]= %f ; var[x]= %f ; p90= %f ; p95= %f ; p99= %f ; min= %f ; max = %f\n\n",
-			sum/n, e_x2 - ex_2, p90, p95, p99, times[0], times[n-1]);  
+			ex, e_x2 - ex_2, p90, p95, p99, times[0], times[n-1]);  
 	}
 
 	return 0;
