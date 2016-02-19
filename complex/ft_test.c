@@ -251,6 +251,7 @@ static int ft_run_latency(void)
   int ret, i;
 
 	for (i = 0; i < ft_ctrl.size_cnt; i += ft_ctrl.inc_step) {
+		printf("iter %d of %d\n", i, ft_ctrl.size_cnt);
 		ft_tx_ctrl.msg_size = ft_ctrl.size_array[i];
 		if (ft_tx_ctrl.msg_size > fabric_info->ep_attr->max_msg_size)
 			break;
@@ -272,47 +273,47 @@ static int ft_run_latency(void)
 			ft_pingpong_dgram() : ft_pingpong();
 		clock_gettime(CLOCK_MONOTONIC, &end);
 		if (ret) {
-			return ret;
 			printf("ret %d", ret);
+			return ret;
 		}
 		show_perf("lat", ft_tx_ctrl.msg_size, ft_ctrl.xfer_iter, &start, &end, 2);
         
-	    double sum=0, sum2=0, p90, p95, p99;
+		double sum=0, sum2=0, p90, p95, p99;
 
 		int cmp(const void* x1, const void* x2) {
 		  return *((double*) x1) - *((double*) x2);
 		}
 		size_t n = ft_ctrl.xfer_iter;
-        double times[n];
+		double times[n];
 		for (i = 0; i < n; i++) {
-          double t = times[i] = (ends[i] - starts[i]) / 2;
-		  sum += t;
-		  sum2 += t*t;
+			double t = times[i] = (ends[i] - starts[i]) / 2;
+			sum += t;
+			sum2 += t*t;
 		}
 		qsort(times, n, sizeof(double), cmp);
 		p90 = times[(int)(n * 0.90)];
 		p95 = times[(int)(n * 0.95)];
 		p99 = times[(int)(n * 0.99)];
-        double ex = sum/n;
+		double ex = sum/n;
 		double e_x2 = sum2/n;
 		double ex_2 = ex*ex;
 		printf("ticks:    e[x]= %f ; var[x]= %f ; p90= %f ; p95= %f ; p99= %f ; min= %f ; max = %f\n",
-               sum/n, e_x2 - ex_2, p90, p95, p99, times[0], times[n-1]);
+			sum/n, e_x2 - ex_2, p90, p95, p99, times[0], times[n-1]);
         
-        double avgusec = (float)get_elapsed(&start, &end, MICRO) / n;        
+		double avgusec = (float)get_elapsed(&start, &end, MICRO) / n;        
 		for (i = 0; i < ft_ctrl.xfer_iter; i++) {
-          double t = times[i] = times[i] / ex * avgusec;
-		  sum += t;
-		  sum2 += t*t;
+			double t = times[i] = times[i] / ex * avgusec;
+			sum += t;
+			sum2 += t*t;
 		}
 		p90 = times[(int)(n * 0.90)];
 		p95 = times[(int)(n * 0.95)];
 		p99 = times[(int)(n * 0.99)];
-        ex = sum/n;
+		ex = sum/n;
 		e_x2 = sum2/n;
 		ex_2 = ex*ex;
 		printf("us:    e[x]= %f ; var[x]= %f ; p90= %f ; p95= %f ; p99= %f ; min= %f ; max = %f\n\n",
-               sum/n, e_x2 - ex_2, p90, p95, p99, times[0], times[n-1]);  
+			sum/n, e_x2 - ex_2, p90, p95, p99, times[0], times[n-1]);  
 	}
 
 	return 0;
