@@ -300,7 +300,8 @@ static int ft_run_latency(void)
 		printf("ticks:    e[x]= %f ; var[x]= %f ; p90= %f ; p95= %f ; p99= %f ; min= %f ; max = %f\n",
 			ex, e_x2 - ex_2, p90, p95, p99, times[0], times[n-1]);
         
-		double avgusec = (float)get_elapsed(&start, &end, MICRO) / n;        
+		double avgusec = (float)get_elapsed(&start, &end, MICRO) / n;
+		sum = sum2 = 0;  
 		for (int i = 0; i < n; i++) {
 			double t = times[i] = times[i] / ex * avgusec;
 			sum += t;
